@@ -309,6 +309,26 @@ def export_html(aid: int, download: int = 0):
     return HTMLResponse(html, headers=headers)
 
 
+# ---------------- Windsor.ai ----------------
+@app.get("/api/windsor/accounts")
+def windsor_accounts(site_url: str | None = None):
+    """Search Console sites and GA4 properties in the Windsor workspace, plus a suggestion for ``site_url``."""
+    try:
+        accounts = windsor.list_accounts()
+    except windsor.WindsorError as exc:
+        raise HTTPException(400, str(exc))
+    return {**accounts, "suggested": windsor.auto_match(site_url, accounts) if site_url else None}
+
+
+@app.post("/api/windsor/test")
+def windsor_test():
+    try:
+        accounts = windsor.list_accounts()
+    except windsor.WindsorError as exc:
+        raise HTTPException(400, str(exc))
+    return {"ok": True, "gsc_accounts": len(accounts["gsc"]), "ga4_accounts": len(accounts["ga4"]), **accounts}
+
+
 # ---------------- settings ----------------
 @app.get("/api/settings")
 def get_settings():

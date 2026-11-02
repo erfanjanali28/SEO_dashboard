@@ -164,6 +164,25 @@ async function viewClient(id) {
   $("#add-site").onclick = () => siteForm({ client_id: id, industry: c.industry });
   document.querySelectorAll("[data-run]").forEach((b) => b.onclick = async () => { await api(`/api/sites/${b.dataset.run}/audit`, { method: "POST" }); location.hash = `#/site/${b.dataset.run}`; });
 }
+async function loadWindsorAccounts(s, suggestOnly) {
+  const note = $("#w-note");
+  if (!note) return;
+  try {
+    const r = await api(`/api/windsor/accounts${s.url ? "?site_url=" + encodeURIComponent(s.url) : ""}`);
+    for (const [key, sel] of [["gsc", "#w-gsc"], ["ga4", "#w-ga4"]]) {
+      const el = $(sel); if (!el) continue;
+      const current = suggestOnly ? "" : (key === "gsc" ? s.windsor_gsc_account : s.windsor_ga4_account) || "";
+      const pick = current || (r.suggested && r.suggested[key]) || "";
+      el.innerHTML = `<option value="">Auto-detect from the domain</option>` + r[key].map((a) =>
+        `<option value="${esc(a.id)}" ${a.id === pick ? "selected" : ""}>${esc(a.name)}${a.name !== a.id ? " (" + esc(a.id) + ")" : ""}</option>`).join("");
+    }
+    const sug = r.suggested || {};
+    note.innerHTML = `${r.gsc.length} Search Console site(s) and ${r.ga4.length} GA4 propert${r.ga4.length === 1 ? "y" : "ies"} found in your Windsor.ai account.` +
+      (s.url && !(sug.gsc && sug.ga4) ? ` <b>Not every account could be matched to this domain. Pick it from the list.</b>` : "");
+  } catch (e) {
+    note.innerHTML = `Windsor.ai accounts could not be loaded: ${esc(e.message)} <a href="#/settings">Open Settings</a>`;
+  }
+}
 function intervalLabel(h) { return h % 720 === 0 ? `${h / 720} month(s)` : h % 168 === 0 ? `${h / 168} week(s)` : h % 24 === 0 ? `${h / 24} day(s)` : `${h} hour(s)`; }
 
 function siteForm(s = {}) {
@@ -179,9 +198,12 @@ function siteForm(s = {}) {
     <div><label>Custom interval (hours)</label><input name="interval_custom" type="number" min="1" value="${custom ? s.interval_hours : ""}"></div></div>
     <div class="grid g2"><div><label>Max pages per crawl</label><input name="max_pages" type="number" min="5" max="2000" value="${s.max_pages || 150}"></div>
     <div><label>Language</label><input name="language" value="${esc(s.language || "en")}"></div></div>
-    <div class="grid g2"><div><label>Windsor.ai GSC account (optional)</label><input name="windsor_gsc_account" value="${esc(s.windsor_gsc_account)}" placeholder="sc-domain:example.com"></div>
-    <div><label>Windsor.ai GA4 account (optional)</label><input name="windsor_ga4_account" value="${esc(s.windsor_ga4_account)}" placeholder="properties/123456"></div></div>
+    <div class="grid g2"><div><label>Windsor.ai: Search Console site</label><select name="windsor_gsc_account" id="w-gsc"><option value="">Auto-detect from the domain</option>${s.windsor_gsc_account ? `<option value="${esc(s.windsor_gsc_account)}" selected>${esc(s.windsor_gsc_account)}</option>` : ""}</select></div>
+    <div><label>Windsor.ai: GA4 property</label><select name="windsor_ga4_account" id="w-ga4"><option value="">Auto-detect from the domain</option>${s.windsor_ga4_account ? `<option value="${esc(s.windsor_ga4_account)}" selected>${esc(s.windsor_ga4_account)}</option>` : ""}</select></div></div>
+    <p class="muted small" id="w-note">Loading your Windsor.ai accounts…</p>
     <div class="row" style="margin-top:16px"><button class="btn" type="submit">Save</button><button class="btn secondary" type="button" onclick="closeModal()">Cancel</button></div></form>`);
+  loadWindsorAccounts(s);
+  $("#sf [name=url]").onchange = () => loadWindsorAccounts({ ...s, url: $("#sf [name=url]").value }, true);
   $("#sf").onsubmit = async (e) => {
     e.preventDefault();
     const d = Object.fromEntries(new FormData(e.target).entries());
@@ -203,8 +225,12 @@ async function viewSettings() {
   const s = await api("/api/settings");
   app.innerHTML = `<h1>Settings</h1><form id="set" class="grid g2">
     <div class="card"><h2>Google Search Console + GA4 via Windsor.ai</h2>
-      <p class="muted small">Connect your Google accounts at windsor.ai (connectors: Search Console, Google Analytics 4), copy your API key from the Windsor.ai dashboard, and paste it here. Every site's "Sync GSC/GA4" button and each scheduled audit then pull clicks, impressions, positions, sessions and key events automatically.</p>
-      <label>Windsor.ai API key</label><input name="windsor_api_key" value="${esc(s.windsor_api_key || "")}" autocomplete="off"></div>
+      <p class="muted small">This app connects with your Windsor.ai <b>API key</b>, never your password.</p>
+      <ol class="small"><li>Sign in at <a href="https://onboard.windsor.ai" target="_blank" rel="noopener">onboard.windsor.ai</a> and make sure the <b>Google Search Console</b> and <b>Google Analytics 4</b> connectors are connected.</li>
+      <li>Copy your API key from your Windsor.ai account (it is shown on the connector / data preview pages and in your account settings).</li>
+      <li>Paste it below, click <b>Save settings</b>, then <b>Test connection</b>.</li></ol>
+      <label>Windsor.ai API key</label><input name="windsor_api_key" value="${esc(s.windsor_api_key || "")}" autocomplete="off">
+      <div class="row" style="margin-top:10px"><button class="btn secondary" type="button" id="w-test">Test connection</button></div><div id="w-result" class="small" style="margin-top:8px"></div></div>
     <div class="card"><h2>Core Web Vitals (PageSpeed Insights)</h2>
       <p class="muted small">Optional Google API key with the PageSpeed Insights API enabled. It raises the quota. Without a key, PSI still works at a low rate.</p>
       <label>PageSpeed API key</label><input name="pagespeed_api_key" value="${esc(s.pagespeed_api_key || "")}" autocomplete="off">
@@ -219,6 +245,13 @@ async function viewSettings() {
   let theme = ""; try { theme = localStorage.getItem("theme") || ""; } catch {}
   $("#theme").value = theme;
   $("#theme").onchange = (e) => { applyTheme(e.target.value); try { localStorage.setItem("theme", e.target.value); } catch {} };
+  $("#w-test").onclick = async () => {
+    const out = $("#w-result"); out.textContent = "Testing…";
+    try {
+      const r = await api("/api/windsor/test", { method: "POST" });
+      out.innerHTML = `<span class="ok">✓ Connected.</span> ${r.gsc_accounts} Search Console site(s): ${r.gsc.map((a) => esc(a.name)).join(", ") || "none"}.<br>${r.ga4_accounts} GA4 propert${r.ga4_accounts === 1 ? "y" : "ies"}: ${r.ga4.map((a) => esc(a.name)).join(", ") || "none"}.`;
+    } catch (e) { out.innerHTML = `<span class="bad">✗ ${esc(e.message)}</span> Save the key first if you just pasted it.`; }
+  };
   $("#set").onsubmit = async (e) => { e.preventDefault(); await api("/api/settings", { method: "PUT", body: Object.fromEntries(new FormData(e.target).entries()) }); toast("Settings saved"); route(); };
 }
 function applyTheme(t) { if (t) document.documentElement.dataset.theme = t; else delete document.documentElement.dataset.theme; }
@@ -253,7 +286,7 @@ async function viewSite(id, tab) {
   $("#run").onclick = async () => { await api(`/api/sites/${id}/audit`, { method: "POST" }); route(); };
   $("#sync").onclick = async () => {
     toast("Syncing Search Console and GA4 from Windsor.ai…", 8000);
-    try { const r = await api(`/api/sites/${id}/sync`, { method: "POST" }); toast(`Synced ${r.gsc_rows} GSC rows and ${r.ga4_rows} GA4 rows. ${r.errors.join(" ")}`, 8000); if (tab === "search") route(); }
+    try { const r = await api(`/api/sites/${id}/sync`, { method: "POST" }); toast(`Synced ${r.gsc_rows} Search Console rows (${r.accounts.gsc || "no site"}) and ${r.ga4_rows} GA4 rows (${r.accounts.ga4 || "no property"}). ${r.notes.concat(r.errors).join(" ")}`, 12000); if (tab === "search") route(); }
     catch (e) { toast(e.message, 8000); }
   };
   $("#edit-site").onclick = () => siteForm(s);

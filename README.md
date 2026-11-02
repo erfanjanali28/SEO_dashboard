@@ -71,7 +71,7 @@ python webapp/run.py            # http://127.0.0.1:8000
 ## Notes
 
 - All crawling goes through the repo's SSRF-safe `scripts/url_safety.py`. Crawls run sequentially, one fetch at a time.
-- Windsor.ai endpoint: `https://connectors.windsor.ai/{searchconsole|googleanalytics4}`. Set per-site account IDs when your Windsor workspace holds several properties.
+- **Windsor.ai** connects with your workspace **API key** only (never your password). After saving the key, use **Settings → Test connection** to list your Search Console sites and GA4 properties. Each website picks its own site and property from dropdowns, or auto-matches them by domain, and only that account's rows are imported. A site with no match imports nothing, so data from different clients is never mixed. Re-syncing replaces the synced window.
 - Off-page lists are starting points. Vet every prospect, and mark paid placements `rel="sponsored"`.
 
 ## Tests
