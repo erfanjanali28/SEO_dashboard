@@ -133,7 +133,7 @@ def test_cannibalization_different_page_types_keeps_both():
     assert redirects.page_type(blog) != redirects.page_type(contact)
     out = run([blog, contact], cont=cannibal("/blog/roof-guide/", "/contact"))
     assert not out["redirects"]
-    assert out["decisions"][0]["action"] == "Keep both and differentiate" and "page types" in out["decisions"][0]["why"]
+    assert out["decisions"][0]["action"] == "Keep both and differentiate" and "different intent" in out["decisions"][0]["why"]
 
 
 def test_partial_overlap_needs_a_merge_and_warns_about_stuffing():

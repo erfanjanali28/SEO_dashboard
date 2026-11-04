@@ -44,7 +44,10 @@ def link_suggestions(crawl, kw_map: dict, max_per_target: int = 8, max_total: in
                         "anchor_text": kw, "context": snip,
                         "target_inlinks": target.get("inlink_count", 0),
                         "priority": "high" if target.get("inlink_count", 0) <= 2 else "medium" if rel else "low",
-                        "reason": "orphan/weakly linked target" if target.get("inlink_count", 0) <= 2 else "topical relevance",
+                        "reason": (f"Only {target.get('inlink_count', 0)} internal link{'' if target.get('inlink_count', 0) == 1 else 's'} reach {urlparse(target['url']).path}, and {urlparse(src['url']).path} already mentions '{kw}'."
+                                   if target.get("inlink_count", 0) <= 2 else
+                                   f"{urlparse(src['url']).path} mentions '{kw}' and shares {rel} keyword{'' if rel == 1 else 's'} with {urlparse(target['url']).path}." if rel else
+                                   f"{urlparse(src['url']).path} mentions '{kw}' but does not link to {urlparse(target['url']).path}."),
                     })
                     found += 1
                     break

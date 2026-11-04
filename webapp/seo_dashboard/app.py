@@ -20,7 +20,7 @@ from pydantic import BaseModel
 
 from url_safety import validate_url
 
-from . import audit, db, exports, metrics, report, scheduler
+from . import audit, comparison, db, exports, metrics, report, scheduler
 from .integrations import windsor
 
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -293,6 +293,32 @@ def changes(sid: int):
                     for k in ci.keys() & pi.keys() if ci[k]["count"] != pi[k]["count"]],
         "categories": {g: {"before": prev["scores"]["categories"].get(g), "after": v} for g, v in cur["scores"]["categories"].items()},
     }
+
+
+@app.get("/api/sites/{sid}/compare")
+def compare(sid: int, base: int | None = None, current: int | None = None):
+    """Compare two completed audits of a site. The older one is always the baseline."""
+    _404(db.row("SELECT id FROM sites WHERE id = ?", (sid,)))
+    audits = comparison.site_audits(sid)
+    if len(audits) < 2:
+        return {"available": False, "audits": audits}
+    ids = {a["id"] for a in audits}
+    base = base if base is not None else audits[-2]["id"]
+    current = current if current is not None else audits[-1]["id"]
+    if base not in ids or current not in ids:
+        raise HTTPException(404, "Audit not found for this website")
+    if base == current:
+        raise HTTPException(400, "Choose two different audits")
+    base, current = sorted((base, current))
+    old = db.row("SELECT * FROM audits WHERE id = ?", (base,))
+    new = db.row("SELECT * FROM audits WHERE id = ?", (current,))
+    return {"available": True, "audits": audits, "base": base, "current": current, **comparison.compare_audits(old, new)}
+
+
+@app.get("/api/sites/{sid}/compare/periods")
+def compare_periods(sid: int, days: int = 28):
+    _404(db.row("SELECT id FROM sites WHERE id = ?", (sid,)))
+    return comparison.compare_periods(sid, max(7, min(days, 365)))
 
 
 # ---------------- audits ----------------

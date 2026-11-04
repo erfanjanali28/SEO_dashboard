@@ -10,7 +10,7 @@ Also flags lead-generation gaps, such as high-intent pages without a CTA or form
 from __future__ import annotations
 
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 from urllib.parse import urlparse
 
 from . import html_pages, issue
@@ -30,6 +30,9 @@ PAGE_TYPES = [
     ("careers", r"/(careers?|jobs)"),
     ("about", r"/(about|team|company|who-we-are)"),
 ]
+SITEWIDE_SHARE = 0.3     # an element on this share of pages sits in the site template
+SITEWIDE_ELEMENT = {"click_to_call": "Phone links", "email_click": "Email links", "whatsapp_click": "WhatsApp links"}
+SITEWIDE_PURPOSE = {"click_to_call": "phone calls", "email_click": "email enquiries", "whatsapp_click": "WhatsApp chats", "chat_start": "chat conversations"}
 HIGH_INTENT = {"pricing", "contact", "booking", "demo/trial", "product", "service", "location", "checkout"}
 
 
@@ -50,8 +53,35 @@ def _ev(page, event, element, trigger, params, key_event, priority, why):
             "parameters": params, "key_event": key_event, "priority": priority, "why": why}
 
 
+def _merge_sitewide(events: list[dict], total_pages: int) -> list[dict]:
+    """A template element appears on every page, but one tag covers it: one row, not one per page."""
+    groups = defaultdict(list)
+    for e in events:
+        groups[(e["event_name"], e["gtm_trigger"], None if e["event_name"] in SITEWIDE_ELEMENT else e["element"])].append(e)
+    limit = max(3, total_pages * SITEWIDE_SHARE)
+    out = []
+    for rows in groups.values():
+        name = rows[0]["event_name"]
+        if len(rows) < limit:
+            out += [{**e, "pages": 1} for e in rows]
+            continue
+        goal = SITEWIDE_PURPOSE.get(name, "this interaction")
+        out.append({**rows[0], "element": f"{SITEWIDE_ELEMENT.get(name, rows[0]['element'])} in the site template", "pages": len(rows),
+                    "why": f"Found on {len(rows)} of {total_pages} pages, so it is part of the template. One GTM tag tracks {goal} across all of them."})
+    return out
+
+
+def _one_per_path(pages: list[dict]) -> list[dict]:
+    """A site served on www and non-www needs one plan, not two."""
+    seen = {}
+    for p in pages:
+        u = urlparse(p["url"])
+        seen.setdefault((u.path, u.query), p)
+    return list(seen.values())
+
+
 def analyze(crawl, ga4_rows: list[dict] | None = None) -> dict:
-    pages = html_pages(crawl.pages)
+    pages = _one_per_path(html_pages(crawl.pages))
     events, gaps, spots = [], [], []
     tracking = Counter()
     for p in pages:
@@ -69,27 +99,29 @@ def analyze(crawl, ga4_rows: list[dict] | None = None) -> dict:
         t = page_type(p)
         type_counts[t] += 1
         url = p["url"]
+        where = urlparse(url).path or "/"
+        topic = ((p.get("h1") or [None])[0] or p.get("title") or urlparse(url).path)[:70]
         lead_forms = [f for f in p.get("forms", []) if not f["is_search"]]
         for f in lead_forms:
             label = f"form#{f['id']}" if f["id"] else f"form → {f['action'] or '(same page)'}"
             is_newsletter = f["fields"] == ["email"] or (len(f["fields"]) <= 2 and f["has_email"] and re.search(r"subscribe|newsletter|join", f["submit_text"], re.I))
             if is_newsletter:
                 events.append(_ev(url, "sign_up", label, "Form Submission (wait for tags, check validation) or a dataLayer push on success",
-                                  "method=newsletter, form_id, page_location", True, "high", "Newsletter capture shows early funnel interest."))
+                                  "method=newsletter, form_id, page_location", True, "high", f"Counts newsletter signups from {where}, an early sign of interest."))
             else:
                 events.append(_ev(url, "form_start", label, "Element Visibility + first input focus (Custom JS listener)",
-                                  "form_id, form_name, page_type", False, "medium", "Measures form abandonment (starts minus submits)."))
+                                  "form_id, form_name, page_type", False, "medium", f"Compares starts with submits on the {len(f['fields'])}-field form on {where}, which shows whether it loses people."))
                 events.append(_ev(url, "generate_lead", label, "dataLayer.push({event:'generate_lead'}) on successful submit (preferred), or a thank-you page view",
-                                  "form_id, lead_type, value, currency, page_location", True, "critical", "Primary lead conversion. Import it into Google Ads as a conversion."))
+                                  "form_id, lead_type, value, currency, page_location", True, "critical", f"Main lead conversion from the form on {where}. Import it into Google Ads as a conversion."))
         if p.get("tel_links"):
             events.append(_ev(url, "click_to_call", f"{p['tel_links']} tel: link(s)", "Click - Just Links, Click URL starts with 'tel:'",
-                              "link_url, page_location, link_position", True, "high", "Phone leads are often the main conversion for local and service businesses."))
+                              "link_url, page_location, link_position", True, "high", f"Counts calls from the {p['tel_links']} phone link{'s' if p['tel_links'] != 1 else ''} on {where}."))
         if p.get("mailto_links"):
             events.append(_ev(url, "email_click", f"{p['mailto_links']} mailto: link(s)", "Click - Just Links, Click URL starts with 'mailto:'",
-                              "link_url, page_location", True, "medium", "Email contact intent."))
+                              "link_url, page_location", True, "medium", f"Counts email contacts from the {p['mailto_links']} email link{'s' if p['mailto_links'] != 1 else ''} on {where}."))
         if p.get("whatsapp_links"):
             events.append(_ev(url, "whatsapp_click", "WhatsApp link(s)", "Click - Just Links, Click URL contains 'wa.me' or 'whatsapp'",
-                              "link_url, page_location", True, "high", "Messaging leads."))
+                              "link_url, page_location", True, "high", f"Counts WhatsApp enquiries from {where}."))
         for c in p.get("ctas", [])[:6]:
             txt = c["text"].lower()
             if "cart" in txt:
@@ -111,44 +143,44 @@ def analyze(crawl, ga4_rows: list[dict] | None = None) -> dict:
                 continue
             seen_global.add(sig)
             events.append(_ev(url, ev, f"{c['tag']} \"{c['text']}\" → {c['href'][:80]}", f"Click - All Elements, Click Text equals \"{c['text']}\"",
-                              "cta_text, cta_location, page_type, link_url", key, "high" if key else "medium", "Measures which CTAs drive the funnel."))
+                              "cta_text, cta_location, page_type, link_url", key, "high" if key else "medium", f"Shows how often '{c['text'][:50]}' on {where} gets clicked, so weak calls to action stand out."))
         if p.get("downloads"):
             events.append(_ev(url, "file_download", f"{len(p['downloads'])} download link(s)", "GA4 Enhanced Measurement (automatic), or Click URL matches \\.(pdf|docx?|xlsx?|zip)$",
-                              "file_name, file_extension, link_url", t in ("blog/article", "service"), "medium", "Lead-magnet and brochure engagement."))
+                              "file_name, file_extension, link_url", t in ("blog/article", "service"), "medium", f"Shows which of the {len(p['downloads'])} download{'s' if len(p['downloads']) != 1 else ''} on {where} people actually take."))
         if p.get("videos"):
             events.append(_ev(url, "video_progress", f"{p['videos']} video(s)", "YouTube Video trigger (Start, Complete, Progress 25/50/75%)",
-                              "video_title, video_percent, video_provider", False, "low", "Content engagement."))
+                              "video_title, video_percent, video_provider", False, "low", f"Shows how much of the {p['videos']} video{'s' if p['videos'] != 1 else ''} on {where} gets watched."))
         if p.get("chat_widget"):
             events.append(_ev(url, "chat_start", "Live chat widget", "The chat vendor's JS callback, pushed to the dataLayer",
-                              "chat_provider, page_location", True, "high", "Chat conversations are leads."))
+                              "chat_provider, page_location", True, "high", f"Counts chats started from {where}."))
         if t == "pricing":
-            events.append(_ev(url, "view_pricing", "Page view", "Page View, Page Path matches the pricing URL", "plan_viewed", False, "medium", "Sales-qualified intent signal for remarketing audiences."))
+            events.append(_ev(url, "view_pricing", "Page view", "Page View, Page Path matches the pricing URL", "plan_viewed", False, "medium", f"Builds a remarketing audience from visitors to '{topic}'."))
         if t == "product":
-            events.append(_ev(url, "view_item", "Product detail", "dataLayer ecommerce push (GA4 ecommerce schema)", "items[], value, currency", False, "high", "Required for GA4 ecommerce funnels."))
+            events.append(_ev(url, "view_item", "Product detail", "dataLayer ecommerce push (GA4 ecommerce schema)", "items[], value, currency", False, "high", f"Starts the GA4 ecommerce funnel for '{topic}'."))
         if t == "checkout":
-            events.append(_ev(url, "begin_checkout", "Checkout start", "dataLayer ecommerce push", "items[], value, currency, coupon", False, "critical", "Checkout funnel."))
-            events.append(_ev(url, "purchase", "Order confirmation", "dataLayer ecommerce push on the confirmation page", "transaction_id, value, currency, tax, shipping, items[]", True, "critical", "Revenue attribution."))
+            events.append(_ev(url, "begin_checkout", "Checkout start", "dataLayer ecommerce push", "items[], value, currency, coupon", False, "critical", f"Marks the start of checkout on {urlparse(url).path}."))
+            events.append(_ev(url, "purchase", "Order confirmation", "dataLayer ecommerce push on the confirmation page", "transaction_id, value, currency, tax, shipping, items[]", True, "critical", f"Attributes revenue to the order confirmed on {urlparse(url).path}."))
         if t == "blog/article":
-            events.append(_ev(url, "scroll_depth", "Article body", "Scroll Depth trigger at 50/75/90% (vertical)", "percent_scrolled, content_group", False, "low", "Content engagement quality."))
+            events.append(_ev(url, "scroll_depth", "Article body", "Scroll Depth trigger at 50/75/90% (vertical)", "percent_scrolled, content_group", False, "low", f"Shows how far readers get through '{topic}'."))
 
         # Lead-gen gaps / opportunity spots
         has_conv = bool(lead_forms or p.get("tel_links") or p.get("ctas") or p.get("whatsapp_links") or p.get("chat_widget"))
         traffic = sessions_by_page.get(urlparse(url).path, 0)
         if t in HIGH_INTENT and not has_conv:
             gaps.append({"url": url, "page_type": t, "problem": "High-intent page with no form, CTA or click-to-call",
-                         "recommendation": "Add an above-the-fold primary CTA (quote, book or demo), a short 3–4 field form, and a sticky click-to-call button on mobile."})
+                         "recommendation": f"'{topic}' is a {t} page with no way to respond. Add a primary call to action above the fold, a 3–4 field form, and click-to-call on mobile."})
         elif t == "blog/article" and not lead_forms:
             spots.append({"url": url, "page_type": t, "opportunity": "Content upgrade / lead magnet",
-                          "recommendation": "Add an inline lead magnet (checklist, template or calculator) after the second H2, plus a contextual CTA to the matching service page.", "sessions": traffic})
+                          "recommendation": f"Offer a checklist or template on '{topic}' after the second H2, and link it to the matching service page.", "sessions": traffic})
         elif t in ("service", "location") and not lead_forms:
             spots.append({"url": url, "page_type": t, "opportunity": "Embedded quote form",
-                          "recommendation": "Embed a short quote/contact form next to the service description, plus trust badges and reviews.", "sessions": traffic})
+                          "recommendation": f"Visitors to '{topic}' have no form. Embed a short quote form beside the description, with reviews nearby.", "sessions": traffic})
         elif t == "home" and not lead_forms and not p.get("tel_links"):
             spots.append({"url": url, "page_type": t, "opportunity": "Hero CTA",
-                          "recommendation": "Make the primary CTA in the hero section specific (e.g. 'Get a free quote in 2 minutes') and add social proof underneath.", "sessions": traffic})
+                          "recommendation": f"The home page has no form or phone link. Add a specific call to action to the hero of '{topic}', with social proof underneath.", "sessions": traffic})
         if traffic and not has_conv:
             spots.append({"url": url, "page_type": t, "opportunity": "High-traffic page without a conversion path",
-                          "recommendation": "Add a contextual CTA and an exit-intent offer.", "sessions": traffic})
+                          "recommendation": f"{round(traffic)} sessions reach '{topic}', but it has no form, button or phone link. Add a call to action that fits the page.", "sessions": traffic})
 
     issues = []
     if not (tracking["gtm"] or tracking["ga4"]):
@@ -173,6 +205,7 @@ def analyze(crawl, ga4_rows: list[dict] | None = None) -> dict:
                             [], impact=4, effort=2))
 
     order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    events = _merge_sitewide(events, len(pages))
     events.sort(key=lambda e: (order[e["priority"]], e["page_url"]))
     key_events = sorted({e["event_name"] for e in events if e["key_event"]})
     setup = [

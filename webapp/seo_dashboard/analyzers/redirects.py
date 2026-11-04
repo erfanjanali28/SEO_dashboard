@@ -42,6 +42,8 @@ MERGE_SIMILARITY = 0.25          # below this the pages are different content
 NEAR_DUPLICATE_REDIRECT = 0.85
 TEMPLATE_FAMILY_PAIRS = 3        # a page near-duplicating this many others is a template
 LOSER_TRAFFIC_SHARE = 0.3        # a "loser" this close to the winner needs a human decision
+DEV_LABEL = re.compile(r"^(dev|develop|development|staging|stage|stg|test|testing|preview|uat|sandbox|demo)\d*$|dev$|staging$", re.I)
+LEGAL_PAGE = re.compile(r"privacy|gdpr|cookie|terms|legal|imprint|impressum|osobni|soukromi|podminky", re.I)
 LISTING_URL = re.compile(r"/(category|categories|kategorie|kategorii|tag|tags|stitek|stitky|archive|archiv|author|page)(/|$)", re.I)
 MAX_LINK_UPDATES = 5000
 TYPO_SIMILARITY = 0.85           # URLs this close are almost certainly a typo
@@ -65,6 +67,46 @@ def _words(text: str) -> set[str]:
 
 def _url_words(url: str) -> set[str]:
     return {_fold(t) for t in _tokens(url) if not t.isdigit()} - GENERIC_TOKENS
+
+
+def _path(url: str) -> str:
+    p = urlparse(url or "")
+    return (p.path or "/") + (f"?{p.query}" if p.query else "")
+
+
+def _topic(url: str) -> str:
+    return " ".join(sorted(_url_words(url))) or _path(url)
+
+
+def _is_dev_host(host: str) -> bool:
+    return any(DEV_LABEL.search(label) for label in host.split(".")[:-1])
+
+
+def _host_copies(pages: dict, origin: str) -> tuple[str, dict]:
+    """Find a site served in full on two hosts, such as www and non-www.
+
+    Returns the preferred host, chosen by what the pages' canonicals declare, and
+    each duplicate host with its count of shared and total paths.
+    """
+    paths = defaultdict(set)
+    for p in html_pages(pages):
+        if not p.get("redirect_chain"):
+            paths[urlparse(p["url"]).netloc].add(urlparse(p["url"]).path)
+    fallback = urlparse(origin).netloc
+    votes = Counter(urlparse(p.get("canonical") or "").netloc for p in html_pages(pages))
+    declared = [h for h, _ in votes.most_common() if h in paths]
+    if declared:
+        primary = declared[0]
+    elif fallback in paths or not paths:
+        primary = fallback
+    else:
+        primary = max(paths, key=lambda h: len(paths[h]))
+    main = paths.get(primary, set())
+    copies = {}
+    for host, seen in paths.items():
+        if host != primary and main and len(seen & main) >= 0.5 * len(seen):
+            copies[host] = (len(seen & main), len(seen))
+    return primary, copies
 
 
 def _is_home(url: str) -> bool:
@@ -118,7 +160,14 @@ def server_rules(rows: list[dict]) -> dict:
     """Apache and nginx rules for rows confident enough to deploy after review."""
     apache, nginx, skipped = [], [], 0
     for r in rows:
-        if r["confidence"] == "low":
+        if r.get("host_move"):
+            old, new = r["host_move"]
+            scheme = urlparse(r["to"]).scheme
+            apache += [f"# {r['source']}", "RewriteEngine On", "RewriteCond %{HTTP_HOST} ^" + old.replace(".", "\\.") + "$ [NC]",
+                       f"RewriteRule ^(.*)$ {scheme}://{new}/$1 [R=301,L]"]
+            nginx += [f"# {r['source']}", f"server {{ server_name {old}; return 301 {scheme}://{new}$request_uri; }}"]
+            continue
+        if r["confidence"] == "low" or r.get("method") == "restore":
             continue
         src, dst = _rule_path(r["from"]), r.get("to")
         if not src or (dst and re.search(r"[\s\"'<>\\;{}$]", dst)):
@@ -136,7 +185,7 @@ def server_rules(rows: list[dict]) -> dict:
     return {"apache": "\n".join(apache), "nginx": "\n".join(nginx), "skipped": skipped}
 
 
-def keyword_stuffing(crawl, kw_map: dict) -> list[dict]:
+def keyword_stuffing(crawl, kw_map: dict, hidden_hosts=()) -> list[dict]:
     """Repetition of a page's primary keyword in its text, title and inbound anchors.
 
     Density is not a Google metric. It is a heuristic for spotting copy that
@@ -145,8 +194,8 @@ def keyword_stuffing(crawl, kw_map: dict) -> list[dict]:
     card tag without anyone having written it that way.
     """
     out = []
-    live = [p for p in html_pages(crawl.pages) if indexable(p)]
-    for p in live:
+    every = [p for p in html_pages(crawl.pages) if urlparse(p["url"]).netloc not in hidden_hosts]
+    for p in (x for x in every if indexable(x)):
         kws = kw_map.get(p["url"], [])
         if not kws:
             continue
@@ -161,29 +210,46 @@ def keyword_stuffing(crawl, kw_map: dict) -> list[dict]:
         if hits >= 6 and density >= (2 if multi_word else 4):
             out.append({"url": p["url"], "keyword": kw, "where": "Body text", "occurrences": hits, "density": density,
                         "severity": "high" if density >= (3.5 if multi_word else 6) else "medium",
-                        "recommendation": "Rewrite for readers: use synonyms and related terms, and keep the exact phrase to the title, H1 and a few natural mentions."})
-        title_hits = _occurrences((p.get("title") or "").lower(), kw)
+                        "recommendation": f"'{kw}' appears {hits} times in {total} words of body text, about once every {total // hits} words. "
+                                          f"Bring it down to around {max(3, round(total / 100))} and use {' or '.join(repr(k) for k, _ in kws[1:3]) or 'related terms'} in the other places."})
+        # The part after a separator is the brand, which is not a repeat of the keyword.
+        title_hits = _occurrences(re.split(r"\s[|\-–—]\s", (p.get("title") or "").lower())[0], kw)
         if title_hits >= 2:
             out.append({"url": p["url"], "keyword": kw, "where": "Title", "occurrences": title_hits, "density": None, "severity": "medium",
-                        "recommendation": "Use the keyword once in the title and spend the remaining characters on a benefit or qualifier."})
+                        "recommendation": f"The title '{p.get('title')}' repeats '{kw}' {title_hits} times. Keep one and use the space for a benefit or qualifier."})
     anchors, totals = Counter(), Counter()
-    for p in html_pages(crawl.pages):
+    for p in every:
         for link in p.get("internal_links", []):
             if link.get("nav") or not link.get("text"):
                 continue
             totals[link["href"]] += 1
             anchors[(link["href"], link["text"].strip().lower())] += 1
     for (target, anchor), n in anchors.items():
-        if n >= 5 and 1 < len(anchor.split()) <= MAX_ANCHOR_WORDS and n / totals[target] >= 0.6:
+        keywords = [k for k, _ in kw_map.get(target, [])]
+        # An anchor is only stuffing when it is a keyword. A card repeating the page's name is not.
+        if n >= 5 and 1 < len(anchor.split()) <= MAX_ANCHOR_WORDS and anchor in keywords[:6] and n / totals[target] >= 0.6:
+            others = [k for k in keywords if k != anchor][:2]
             out.append({"url": target, "keyword": anchor, "where": "Internal anchors", "occurrences": n,
                         "density": round(n / totals[target] * 100, 1), "severity": "medium",
-                        "recommendation": "Vary the anchors pointing at this page. Exact-match anchors on most links look engineered."})
+                        "recommendation": f"{n} of the {totals[target]} body links to {_path(target)} use the exact anchor '{anchor}'. "
+                                          f"Rewrite some to {' or '.join(repr(k) for k in others) or 'natural phrases'}."})
     return sorted(out, key=lambda r: (r["severity"] != "high", -(r["density"] or 0)))[:500]
 
 
 def analyze(crawl, kw_map: dict, tech: dict, cont: dict, suggestions: list[dict], gsc: list[dict] | None = None) -> dict:
     pages = crawl.pages
-    live = {p["url"]: p for p in html_pages(pages) if not p.get("redirect_chain")}
+    primary_host, copies = _host_copies(pages, crawl.origin)
+
+    def on_copy(url: str | None) -> bool:
+        return urlparse(url or "").netloc in copies
+
+    # A duplicate host gets one host-wide redirect, so its pages are not planned twice.
+    tech = {**tech,
+            "redirect_suggestions": [r for r in tech.get("redirect_suggestions", []) if not on_copy(r["from"])],
+            "broken_links": [b for b in tech.get("broken_links", []) if not on_copy(b["source"]) and not on_copy(b["target"])],
+            "links_to_redirects": [x for x in tech.get("links_to_redirects", []) if not on_copy(x["source"])]}
+    base_url = f"{urlparse(crawl.origin).scheme}://{primary_host}"
+    live = {p["url"]: p for p in html_pages(pages) if not p.get("redirect_chain") and not on_copy(p["url"])}
     by_key = {_key(u): u for u in live}
     open_urls = [u for u, p in live.items() if indexable(p)]
     terms = {u: _words(" ".join([live[u].get("title") or "", " ".join(live[u].get("h1") or []),
@@ -260,23 +326,33 @@ def analyze(crawl, kw_map: dict, tech: dict, cont: dict, suggestions: list[dict]
         sources = {b["source"] for b in links}
         target, score, why = best_target(url, anchor_words, sources)
         base = {"from": url, "status": status, "source": source, "score": score, "inlinks": len(sources)}
+        topic = _topic(url)
+        linked = ("1 page still links here" if len(sources) == 1 else f"{len(sources)} pages still link here") if sources else "No internal links point here"
         if target and score >= 0.25:
             conf = "high" if score >= 0.6 else "medium" if score >= 0.4 else "low"
             typo = SequenceMatcher(None, urlparse(url).path.rstrip("/"), urlparse(target).path.rstrip("/")).ratio() >= TYPO_SIMILARITY
             add_redirect({**base, "to": target, "method": "301", "action": "301 redirect", "confidence": "high" if typo else conf,
-                          "reason": "Almost the same URL, so this is very likely a typo." if typo else
-                          "Closest live page by URL, anchor text and topic" + (f" ({'; '.join(why)})" if why else "") + "."})
+                          "reason": f"{_path(url)} is only a few characters from {_path(target)}, so this is very likely a typo. {linked}." if typo else
+                          f"Best match for '{topic}' at {round(score * 100)}%" + (f": {'; '.join(why)}" if why else "") + f". {linked}."})
             return
         parts = urlparse(url).path.rstrip("/").split("/")
         while len(parts) > 2:
             parts.pop()
-            hub = by_key.get(_key(f"{crawl.origin}{'/'.join(parts)}"))
+            hub = by_key.get(_key(f"{base_url}{'/'.join(parts)}"))
             if hub and hub in open_urls:
                 add_redirect({**base, "to": hub, "method": "301", "action": "301 redirect", "confidence": "low",
-                              "reason": "No equivalent page exists. This is the nearest parent section, so check it really serves the same need."})
+                              "reason": f"No page matches '{topic}', so {_path(hub)} is the nearest parent section. Check it serves the same need. {linked}."})
                 return
+        anchor_text = next((b.get("anchor") for b in links if b.get("anchor")), None)
+        said = f"linked as '{anchor_text}'" if anchor_text else "a page visitors expect"
+        if LEGAL_PAGE.search(_fold(f"{url} {anchor_text or ''}")):
+            add_redirect({**base, "to": None, "method": "restore", "action": "Restore this page", "confidence": "high",
+                          "reason": f"{_path(url)} looks like a legal page ({said}) and it returns {status}. Publish it again rather than removing it. {linked}."})
+            return
+        closest = (f"The closest page, {_path(target)}, is only a {round(score * 100)}% match, too weak to redirect to."
+                   if target else f"No live page shares a term with '{topic}'.")
         add_redirect({**base, "to": None, "method": "410", "action": "Return 410 and remove links", "confidence": "medium",
-                      "reason": "No live page covers this topic. A redirect to the home page would be treated as a soft 404, so let it go or restore the page if it had value."})
+                      "reason": f"{closest} {linked}. A home page redirect would count as a soft 404, so return 410, or restore {_path(url)} if it earned traffic."})
 
     for r in tech.get("redirect_suggestions", []):
         plan_dead(r["from"], r.get("status"), "404 / 410 error")
@@ -284,7 +360,7 @@ def analyze(crawl, kw_map: dict, tech: dict, cont: dict, suggestions: list[dict]
     # ---------- Existing redirects: chains, temporary, dead ends ----------
     for p in pages.values():
         chain = p.get("redirect_chain") or []
-        if not chain:
+        if not chain or on_copy(p["url"]):
             continue
         final = p.get("final_url")
         final_status = p.get("final_status")
@@ -294,11 +370,11 @@ def analyze(crawl, kw_map: dict, tech: dict, cont: dict, suggestions: list[dict]
         elif len(chain) > 1:
             add_redirect({"from": p["url"], "to": final, "method": "301", "action": "Flatten redirect chain", "confidence": "high", "status": hops[0],
                           "source": "Redirect chain", "score": None, "inlinks": p.get("inlink_count", 0),
-                          "reason": f"{len(chain)} hops today ({' → '.join(map(str, hops))}). Redirect straight to the final URL."})
+                          "reason": f"{_path(p['url'])} takes {len(chain)} hops ({' → '.join(map(str, hops))}) to reach {_path(final)}. Redirect it there directly."})
         elif hops[0] in (302, 303, 307):
             add_redirect({"from": p["url"], "to": final, "method": "301", "action": "Change to 301", "confidence": "medium", "status": hops[0],
                           "source": "Temporary redirect", "score": None, "inlinks": p.get("inlink_count", 0),
-                          "reason": "A temporary redirect keeps the old URL in the index. Make it permanent if the move is permanent."})
+                          "reason": f"{_path(p['url'])} uses a temporary {hops[0]} to {_path(final)}, so Google keeps the old URL indexed. Change it to a 301 if the move is permanent."})
 
     # ---------- Identical and near-duplicate content ----------
     def consolidate(keep: str, drop: str, reason: str, source: str, conf: str, keyword: str | None = None, merge_first: bool = False) -> None:
@@ -335,6 +411,11 @@ def analyze(crawl, kw_map: dict, tech: dict, cont: dict, suggestions: list[dict]
     near = [n for n in cont.get("near_duplicates", []) if n["url_a"] in live and n["url_b"] in live]
     partners = Counter(u for n in near for u in (n["url_a"], n["url_b"]))
 
+    def alternative(url: str, kw: str | None) -> str:
+        """A term the page could own instead of the contested keyword."""
+        other = next((k for k, _ in kw_map.get(url, []) if k != kw and (not kw or kw not in k)), None)
+        return f"'{other}'" if other else "a more specific long-tail keyword"
+
     def differentiate(keyword: str | None, winner: str, loser: str, sim: float, why: str, source: str, impressions=None) -> None:
         decisions.append({"keyword": keyword or "(similar text)", "winner": winner, "other": loser, "action": "Keep both and differentiate",
                           "similarity": sim, "winner_evidence": evidence(winner), "other_evidence": evidence(loser), "why": why,
@@ -349,8 +430,8 @@ def analyze(crawl, kw_map: dict, tech: dict, cont: dict, suggestions: list[dict]
         keep, drop = (a, b) if value(a) >= value(b) else (b, a)
         if _is_home(drop) or sim < NEAR_DUPLICATE_REDIRECT or partners[a] >= TEMPLATE_FAMILY_PAIRS or partners[b] >= TEMPLATE_FAMILY_PAIRS:
             family = partners[a] >= TEMPLATE_FAMILY_PAIRS or partners[b] >= TEMPLATE_FAMILY_PAIRS
-            differentiate(None, keep, drop, sim, "These look like a template family, so give each page unique content instead of collapsing them." if family
-                          else "The text overlaps but is not the same page. Rewrite the shared sections so each page has its own angle.", "Near-duplicate content")
+            differentiate(None, keep, drop, sim, f"{_path(drop)} is {round(sim * 100)}% the same as {_path(keep)} and belongs to a template family of {max(partners[a], partners[b]) + 1} similar pages. Give each one unique content instead of collapsing them." if family
+                          else f"{round(sim * 100)}% of {_path(drop)} matches {_path(keep)}, but it is not the same page. Rewrite the shared text around {alternative(drop, None)}.", "Near-duplicate content")
         else:
             consolidate(keep, drop, f"{round(sim * 100)}% of the text matches a stronger page. Confirm it has no separate purpose.", "Near-duplicate content", "medium")
 
@@ -374,20 +455,21 @@ def analyze(crawl, kw_map: dict, tech: dict, cont: dict, suggestions: list[dict]
             same_type = page_type(live[winner]) == page_type(live[loser])
             share = clicks[_key(loser)] / max(clicks[_key(winner)], 1)
             if _is_home(loser):
-                differentiate(kw, winner, loser, sim, "The home page is never redirected. Shift its copy to brand and overview terms and link to the primary page.", source, c.get("impressions"))
+                differentiate(kw, winner, loser, sim, f"The home page is never redirected. Keep '{kw}' as a short mention and link it to {_path(winner)}.", source, c.get("impressions"))
             elif loser in winners and winners[loser] != kw:
-                differentiate(kw, winner, loser, sim, f"This page is also the primary page for '{winners[loser]}', so redirecting it would lose that keyword.", source, c.get("impressions"))
+                differentiate(kw, winner, loser, sim, f"{_path(loser)} is the primary page for '{winners[loser]}', so redirecting it would lose that keyword. Link it to {_path(winner)} for '{kw}' instead.", source, c.get("impressions"))
             elif not same_type:
-                differentiate(kw, winner, loser, sim, f"Different page types ({page_type(live[loser])} vs {page_type(live[winner])}) serve different intent. Re-target this page to its own long-tail keyword.", source, c.get("impressions"))
+                differentiate(kw, winner, loser, sim, f"{_path(loser)} ({page_type(live[loser])}) and {_path(winner)} ({page_type(live[winner])}) serve different intent. Re-target {_path(loser)} to {alternative(loser, kw)}.", source, c.get("impressions"))
             elif sim < MERGE_SIMILARITY:
-                differentiate(kw, winner, loser, sim, "The pages share a keyword but little text. A canonical would be ignored and a redirect would lose unique content, so re-target this page.", source, c.get("impressions"))
+                differentiate(kw, winner, loser, sim, f"Only {round(sim * 100)}% of the text is shared, so a canonical would be ignored and a redirect would lose content. Re-target {_path(loser)} from '{kw}' to {alternative(loser, kw)}.", source, c.get("impressions"))
             else:
                 exact = sim >= CONSOLIDATE_SIMILARITY
                 conf = "low" if share >= LOSER_TRAFFIC_SHARE and clicks[_key(loser)] else ("high" if exact and not clicks[_key(loser)] else "medium")
                 reason = f"Competes for '{kw}' with {round(sim * 100)}% shared text. Stronger page: {evidence(winner)}. This page: {evidence(loser)}."
                 decisions.append({"keyword": kw, "winner": winner, "other": loser, "action": "301 redirect" if exact else "Merge, then 301",
                                   "similarity": sim, "winner_evidence": evidence(winner), "other_evidence": evidence(loser),
-                                  "why": "Same intent and mostly the same text." if exact else "Same intent with partial overlap. Move anything unique across first, then redirect.",
+                                  "why": f"Same intent and {round(sim * 100)}% the same text, so {_path(loser)} adds nothing that {_path(winner)} lacks." if exact
+                                  else f"Same intent with {round(sim * 100)}% overlap. Move what is unique on {_path(loser)} into {_path(winner)}, then redirect.",
                                   "source": source, "impressions": c.get("impressions")})
                 consolidate(winner, loser, reason, "Keyword cannibalization", conf, kw, merge_first=not exact)
 
@@ -412,7 +494,7 @@ def analyze(crawl, kw_map: dict, tech: dict, cont: dict, suggestions: list[dict]
             del redirects[src]
     moved = {r["from"]: r["to"] for r in redirects.values() if r.get("to")}
 
-    stuffing = keyword_stuffing(crawl, kw_map)
+    stuffing = keyword_stuffing(crawl, kw_map, set(copies))
     stuffed = {r["url"]: r for r in stuffing if r["where"] == "Body text"}
     for row in redirects.values():
         s = stuffed.get(row.get("to"))
@@ -424,25 +506,49 @@ def analyze(crawl, kw_map: dict, tech: dict, cont: dict, suggestions: list[dict]
     # ---------- Internal links that must change ----------
     updates: list[dict] = []
 
-    def link_update(kind: str, source: str, current: str | None, new: str | None, anchor: str | None, why: str) -> None:
+    def link_update(kind: str, source: str, current: str | None, new: str | None, anchor: str | None, detail=None) -> None:
         if len(updates) < MAX_LINK_UPDATES and source != new and source not in moved:
-            updates.append({"kind": kind, "source": source, "current": current, "new": new, "anchor": anchor, "why": why})
+            updates.append({"kind": kind, "source": source, "current": current, "new": new, "anchor": anchor, "detail": detail})
+
+    def link_why(row: dict) -> str:
+        n, cur, new, detail = row["pages"], _path(row["current"]), _path(row["new"]), row["detail"]
+        sitewide = n >= max(3, len(live) / 2)
+        where = f"the site template, so one edit fixes all {n} pages" if sitewide else f"{n} page{'s' if n != 1 else ''}"
+        link = f"The link '{row['anchor']}'" if row["anchor"] else "A link"
+        kind = row["kind"]
+        if kind == "Fix broken link":
+            return f"{link} on {where} goes to {cur}, which returns {detail}. Link straight to {new}."
+        if kind == "Remove broken link":
+            if LEGAL_PAGE.search(_fold(f"{row['current']} {row['anchor'] or ''}")):
+                return f"{link} on {where} goes to {cur}, which returns {detail}. Keep the link and restore the page, because this looks like legal content."
+            return f"{link} on {where} goes to {cur}, which returns {detail}, and no live page replaces it. Remove the link or rewrite the sentence."
+        if kind == "Bypass redirect":
+            return f"{link} on {where} goes to {cur}, which redirects to {new}. Link to the final URL to save a hop."
+        if kind == "Repoint to primary page":
+            return f"{cur} is being merged into {new}. Update the link on {where} before the redirect goes live."
+        if kind == "Align anchor":
+            return f"'{row['anchor']}' points at {detail} different pages, which blurs which should rank. Send it from {cur} to {new}."
+        if detail == "redirected":
+            return f"This suggestion targets {cur}, which is being redirected. Use {new} for '{row['anchor']}'."
+        if detail == "cannibalized":
+            return f"Linking '{row['anchor']}' to {cur} would strengthen the competing page. Send it to {new}, the primary page."
+        return f"'{row['anchor']}' is suggested for {detail} different pages. Use {new} rather than {cur}, so one anchor means one page."
 
     for target, links in broken_by_target.items():
         row = redirects.get(target)
         for b in links:
             if row and row.get("to"):
-                link_update("Fix broken link", b["source"], target, row["to"], b.get("anchor"), "Link directly to the live target so it does not go through a redirect.")
+                link_update("Fix broken link", b["source"], target, row["to"], b.get("anchor"), b.get("status"))
             else:
-                link_update("Remove broken link", b["source"], target, None, b.get("anchor"), "No equivalent page exists. Remove the link or the sentence around it.")
+                link_update("Remove broken link", b["source"], target, None, b.get("anchor"), b.get("status"))
     for x in tech.get("links_to_redirects", []):
         final = resolve(x.get("final"))
         if final:
-            link_update("Bypass redirect", x["source"], x["target"], final, x.get("anchor"), "This link passes through a redirect.")
+            link_update("Bypass redirect", x["source"], x["target"], final, x.get("anchor"))
     for src, dst in moved.items():
         if src in live:
             for ref in live[src].get("inlinks", []):
-                link_update("Repoint to primary page", ref, src, dst, None, "This URL is being consolidated. Update the link before the redirect goes live.")
+                link_update("Repoint to primary page", ref, src, dst, None)
     losers = {(d["keyword"], d["other"]): d["winner"] for d in decisions}
     best_for_anchor = defaultdict(set)
     for s in suggestions:
@@ -466,17 +572,15 @@ def analyze(crawl, kw_map: dict, tech: dict, cont: dict, suggestions: list[dict]
     for s in suggestions:
         target, anchor = s["target_url"], s["anchor_text"]
         if target in moved:
-            link_update("Retarget suggestion", s["source_url"], target, moved[target], anchor, "This internal link suggestion points at a URL that is being redirected.")
+            link_update("Retarget suggestion", s["source_url"], target, moved[target], anchor, "redirected")
         elif (anchor, target) in losers:
-            link_update("Retarget suggestion", s["source_url"], target, losers[(anchor, target)], anchor,
-                        f"Using '{anchor}' to link here would reinforce the cannibalization. Send the anchor to the primary page.")
+            link_update("Retarget suggestion", s["source_url"], target, losers[(anchor, target)], anchor, "cannibalized")
         else:
             competing = rivals(anchor, s["source_url"], best_for_anchor[anchor])
             if target in competing:
                 top = max(competing, key=lambda u: value(u, anchor))
                 if target != top:
-                    link_update("Retarget suggestion", s["source_url"], target, top, anchor,
-                                f"'{anchor}' is suggested for {len(competing)} different pages. One anchor should mean one page.")
+                    link_update("Retarget suggestion", s["source_url"], target, top, anchor, len(competing))
     used = defaultdict(lambda: defaultdict(list))
     for p in live.values():
         for link in p.get("internal_links", []):
@@ -490,17 +594,19 @@ def analyze(crawl, kw_map: dict, tech: dict, cont: dict, suggestions: list[dict]
                 if target in competing:
                     top = max(competing, key=lambda u: value(u, anchor))
                     if target != top:
-                        link_update("Align anchor", src, target, top, anchor, f"The anchor '{anchor}' points at {len(competing)} different pages, which blurs which one should rank.")
+                        link_update("Align anchor", src, target, top, anchor, len(competing))
     # One template link repeats on every page, so group by the change, not the page.
     grouped: dict[tuple, dict] = {}
     for u in updates:
         k = (u["kind"], u["current"], u["new"], u["anchor"])
-        row = grouped.setdefault(k, {**{f: u[f] for f in ("kind", "current", "new", "anchor", "why")}, "sources": []})
+        row = grouped.setdefault(k, {**{f: u[f] for f in ("kind", "current", "new", "anchor", "detail")}, "sources": []})
         if u["source"] not in row["sources"]:
             row["sources"].append(u["source"])
     unique_updates = sorted(grouped.values(), key=lambda r: -len(r["sources"]))
     for row in unique_updates:
         row["pages"] = len(row["sources"])
+        row["why"] = link_why(row)
+        del row["detail"]
 
     # ---------- Canonical plan ----------
     canonicals: list[dict] = []
@@ -519,6 +625,8 @@ def analyze(crawl, kw_map: dict, tech: dict, cont: dict, suggestions: list[dict]
         if u in moved:
             continue
         declared = p.get("canonical")
+        here = _path(u)
+        weight = f"It has {p.get('inlink_count', 0)} internal link{'s' if p.get('inlink_count', 0) != 1 else ''}" + (" and is in the sitemap" if p.get("in_sitemap") else "")
         planned_canon = canon_plan.get(u)
         robots = f"{p.get('meta_robots', '')} {p.get('x_robots_tag', '')}".lower()
         if planned_canon:
@@ -526,31 +634,43 @@ def analyze(crawl, kw_map: dict, tech: dict, cont: dict, suggestions: list[dict]
         elif not declared:
             clean = by_key.get(_key(u.split("?", 1)[0])) if urlparse(u).query else None
             if clean and clean != u:
-                add_canonical(p, resolve(clean), "Parameter URL without canonical", "Query-string versions should hand their signals to the clean URL.", "high")
+                add_canonical(p, resolve(clean), "Parameter URL without canonical", f"{here} competes with {_path(clean)} because it declares no canonical. Hand its signals to the clean URL.", "high")
             elif "noindex" not in robots:
-                add_canonical(p, u, "Missing canonical", "Add a self-referencing canonical so URL variants cannot split signals.", "low")
+                add_canonical(p, u, "Missing canonical", f"{here} has no canonical tag. {weight}, so add a self-reference to stop URL variants splitting those signals.", "low")
         elif _key(declared) == _key(u):
             if declared != u:
-                add_canonical(p, u, "Trailing slash mismatch", "The canonical differs from the URL only by a slash. Use the exact URL.", "low")
+                add_canonical(p, u, "Trailing slash mismatch", f"The canonical says {_path(declared)} but the page loads at {here}. Use the exact URL.", "low")
         else:
             final = pages.get(declared, {}).get("final_url") or (crawl.link_status.get(declared) or {}).get("redirect_to")
             target = by_key.get(_key(declared))
             if not _same(declared, crawl.origin):
-                add_canonical(p, u, "Canonical points to another domain", "Correct only for deliberate syndication. Otherwise this page gives away its rankings.", "high", "medium")
+                host = urlparse(declared).netloc
+                if _is_dev_host(host):
+                    add_canonical(p, u, "Canonical points to a development site", f"{here} names {host}{_path(declared)} as the original, and that host looks like a development site. {weight}, so Google could drop this live page in favour of the dev copy. Use the live URL.", "high")
+                else:
+                    add_canonical(p, u, "Canonical points to another domain", f"{here} hands its rankings to {host}{_path(declared)}. That is right only if the text was republished from {host} on purpose. {weight}, so use the page's own URL if it is yours.", "high", "medium")
             elif "noindex" in robots:
-                add_canonical(p, None, "Noindex combined with canonical", "These send opposite signals. Keep the canonical if this is a duplicate, or the noindex if it should stay out of the index, not both.", "medium", "medium")
+                add_canonical(p, None, "Noindex combined with canonical", f"{here} says noindex and also names {_path(declared)} as its canonical. Those are opposite signals: keep the canonical if it is a duplicate, or the noindex if it should stay out of search.", "medium", "medium")
             elif final and _key(final) in by_key and _key(final) != _key(declared):
-                add_canonical(p, resolve(by_key[_key(final)]), "Canonical points to a redirect", "Canonicals must name the final 200 URL.", "high")
+                add_canonical(p, resolve(by_key[_key(final)]), "Canonical points to a redirect", f"{_path(declared)} redirects to {_path(final)}, so name {_path(final)} directly.", "high")
             elif status_of(declared) not in (None, 200):
-                add_canonical(p, u, "Canonical points to an error page", f"The canonical target returns {status_of(declared)}, so it is ignored.", "high")
+                add_canonical(p, u, "Canonical points to an error page", f"{_path(declared)} returns {status_of(declared)}, so the canonical on {here} is ignored. Use the page's own URL.", "high")
             elif target and not indexable(live[target]):
-                add_canonical(p, resolve(by_key.get(_key(live[target].get("canonical"))) or u), "Canonical points to a non-indexable page", "The target is noindexed or canonicalized elsewhere, so the signal goes nowhere.", "high")
+                blocked_by = "is noindexed" if "noindex" in f"{live[target].get('meta_robots', '')} {live[target].get('x_robots_tag', '')}".lower() else f"canonicalizes to {_path(live[target].get('canonical'))}"
+                add_canonical(p, resolve(by_key.get(_key(live[target].get("canonical"))) or u), "Canonical points to a non-indexable page", f"{_path(declared)} {blocked_by}, so the signal from {here} goes nowhere.", "high")
             elif target and not urlparse(u).query and _similarity(p, live[target]) < MERGE_SIMILARITY:
-                add_canonical(p, u, "Canonical between different pages", "The pages share little text, so search engines will likely ignore this canonical and the page gets no clear signal.", "medium", "medium")
+                add_canonical(p, u, "Canonical between different pages", f"Only {round(_similarity(p, live[target]) * 100)}% of {here} matches {_path(declared)}, so search engines will likely ignore this canonical. Make it self-referencing.", "medium", "medium")
     order = {"high": 0, "medium": 1, "low": 2}
     canonicals.sort(key=lambda c: (order[c["priority"]], c["url"]))
 
     redirect_rows = sorted(redirects.values(), key=lambda r: (CONF_ORDER[r["confidence"]], -(r.get("inlinks") or 0)))
+    scheme = urlparse(crawl.origin).scheme
+    for host, (shared, total) in copies.items():
+        agree = sum(1 for p in html_pages(pages) if urlparse(p["url"]).netloc == host and urlparse(p.get("canonical") or "").netloc == primary_host)
+        redirect_rows.insert(0, {
+            "from": f"{scheme}://{host}/*", "to": f"{scheme}://{primary_host}/*", "method": "301", "action": "Redirect whole host", "confidence": "high", "status": 200,
+            "source": "Duplicate host", "score": None, "inlinks": None, "keyword": None, "merge_first": False, "host_move": [host, primary_host],
+            "reason": f"The whole site loads on both {host} and {primary_host}: {shared} of {total} pages exist on each, and {agree} already name {primary_host} as canonical. One host-wide 301 removes every duplicate at once."})
     issues = []
     if stuffing:
         issues.append(issue("keyword_stuffing", "Content", "high" if any(s["severity"] == "high" for s in stuffing) else "medium", "Possible keyword stuffing",
@@ -560,6 +680,7 @@ def analyze(crawl, kw_map: dict, tech: dict, cont: dict, suggestions: list[dict]
     return {
         "summary": {
             "redirects": sum(1 for r in redirect_rows if r["method"] == "301"), "gone": sum(1 for r in redirect_rows if r["method"] == "410"),
+            "restore": sum(1 for r in redirect_rows if r["method"] == "restore"), "host_copies": len(copies),
             "canonical_fixes": sum(1 for c in canonicals if c["priority"] != "low"), "canonical_missing": sum(1 for c in canonicals if c["priority"] == "low"),
             "differentiate": sum(1 for d in decisions if d["action"].startswith("Keep")), "link_updates": len(unique_updates),
             "links_affected": sum(r["pages"] for r in unique_updates),

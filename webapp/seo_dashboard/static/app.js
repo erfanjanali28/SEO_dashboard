@@ -314,7 +314,7 @@ function applyTheme(t) { if (t) document.documentElement.dataset.theme = t; else
 try { applyTheme(localStorage.getItem("theme") || ""); } catch {}
 
 /* ---------------- Site dashboard ---------------- */
-const TABS = [["overview", "Overview"], ["priorities", "Top 10 & Roadmap"], ["technical", "Technical"], ["onpage", "On-page & Meta"], ["content", "Content"],
+const TABS = [["overview", "Overview"], ["growth", "Growth & Decline"], ["priorities", "Top 10 & Roadmap"], ["technical", "Technical"], ["onpage", "On-page & Meta"], ["content", "Content"],
   ["links", "Internal Links"], ["redirects", "Redirects & Canonicals"], ["structure", "URL Structure"], ["schema", "Schema"], ["performance", "Core Web Vitals"], ["keywords", "Keyword Research"],
   ["search", "Rankings & Traffic"], ["geo", "AIO / GEO"], ["conversion", "Lead Gen & Tracking"], ["offpage", "Off-page"], ["crawl", "Crawl Data"]];
 const FIRST_LOOK_HIDDEN = new Set(["performance", "keywords", "search", "conversion", "offpage"]);
@@ -361,7 +361,7 @@ async function viewSite(id, tab) {
   if (tab === "search") return renderSearch(body, id);
   if (!doneId) { body.innerHTML = `<div class="card"><p>No completed audit yet. ${running ? "Results appear here as soon as the crawl finishes." : "Click <b>Run audit</b> to crawl the site."}</p></div>`; return; }
   const r = await api(`/api/audits/${doneId}/result`);
-  const renderers = { overview: renderOverview, priorities: renderPriorities, technical: renderTechnical, onpage: renderOnpage, content: renderContent,
+  const renderers = { overview: renderOverview, growth: renderGrowth, priorities: renderPriorities, technical: renderTechnical, onpage: renderOnpage, content: renderContent,
     links: renderLinks, redirects: renderRedirects, structure: renderStructure, schema: renderSchema, performance: renderPerformance, keywords: renderKeywords, geo: renderGeo,
     conversion: renderConversion, offpage: renderOffpage, crawl: renderCrawl };
   (renderers[tab] || renderOverview)(body, r, s);
@@ -707,7 +707,8 @@ function renderConversion(el, r) {
     <h2>Lead-generation gaps</h2><div id="t-gap"></div><h2>Lead-generation opportunity spots</h2><div id="t-opp"></div><h2>Issues</h2>${issueList(byCat(r, ["Tracking", "Conversion"]))}`;
   chart("c-ev", barCfg(Object.keys(evc), Object.values(evc), "Placements", C.navy, true));
   chart("c-pt", donutCfg(c.page_types));
-  dataTable("t-ev", c.events, [{ key: "priority", label: "Priority", render: (v) => sev(v) }, urlCol("page_url", "Page"), { key: "event_name", label: "GA4 event", render: (v) => `<code>${esc(v)}</code>` },
+  dataTable("t-ev", c.events, [{ key: "priority", label: "Priority", render: (v) => sev(v) },
+    { key: "page_url", label: "Page", render: (v, e) => e.pages > 1 ? `${e.pages} pages<div class="muted small">site template</div>` : link(v, shortUrl(v)) }, { key: "event_name", label: "GA4 event", render: (v) => `<code>${esc(v)}</code>` },
     { key: "element", label: "Element" }, { key: "gtm_trigger", label: "GTM trigger" }, { key: "parameters", label: "Parameters" }, { key: "key_event", label: "Key event", render: (v) => v ? "✓" : "" }, { key: "why", label: "Why" }]);
   dataTable("t-gap", c.lead_gaps, [urlCol(), { key: "page_type", label: "Type" }, { key: "problem", label: "Problem" }, { key: "recommendation", label: "Recommendation" }]);
   dataTable("t-opp", c.opportunities, [urlCol(), { key: "page_type", label: "Type" }, { key: "opportunity", label: "Opportunity" }, { key: "recommendation", label: "Recommendation" }, { key: "sessions", label: "Sessions" }]);
@@ -737,7 +738,7 @@ function renderRedirects(el, r, s) {
   el.innerHTML = `
     <div class="grid g4">
       ${kpi("301 redirects", m.redirects)}
-      ${kpi("410 (let go)", m.gone, "No equivalent page")}
+      ${kpi("410 (let go)", m.gone, m.restore ? `Plus ${m.restore} to restore` : "No equivalent page")}
       ${kpi("Canonical fixes", m.canonical_fixes, `${m.canonical_missing} pages just need a self-canonical`)}
       ${kpi("Keep both, differentiate", m.differentiate, "No redirect needed")}
       ${kpi("Internal link updates", m.link_updates, `Across ${m.links_affected} links`)}
@@ -775,6 +776,100 @@ function renderRedirects(el, r, s) {
     { key: "new", label: "New target", render: (v) => v ? link(v, shortUrl(v)) : '<span class="muted">remove</span>' }, { key: "anchor", label: "Anchor" }, { key: "why", label: "Why", render: reason }]);
   dataTable("t-stuff", p.stuffing, [urlCol(), { key: "keyword", label: "Keyword" }, { key: "where", label: "Where" }, { key: "occurrences", label: "Count" },
     { key: "density", label: "Density", render: (v) => v == null ? "" : `${v}%` }, { key: "severity", label: "Severity", render: sev }, { key: "recommendation", label: "Fix", render: reason }]);
+}
+
+/* ---------------- Growth & Decline ---------------- */
+const STATUS_CLASS = { improved: "ok", declined: "bad" };
+const VERDICT_CLASS = { Growing: "ok", Declining: "bad", Mixed: "warn", Stable: "muted", "No change": "muted" };
+function shortDate(s) { return s ? new Date(s).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }) : ""; }
+function shortDateTime(s) { return s ? new Date(s).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : ""; }
+function metricValue(v, unit) { return v == null ? '<span class="muted">n/a</span>' : `${esc(typeof v === "number" ? v.toLocaleString() : v)}${esc(unit || "")}`; }
+function changeCell(m) {
+  if (m.change == null) return '<span class="muted">n/a</span>';
+  if (m.change === 0) return '<span class="muted">No change</span>';
+  const text = `${m.change > 0 ? "▲ +" : "▼ "}${esc(m.change.toLocaleString())}${esc(m.unit || "")}${m.percent != null && !m.unit ? ` (${m.percent > 0 ? "+" : ""}${m.percent}%)` : ""}`;
+  return `<span class="${STATUS_CLASS[m.status] || "muted"}" ${m.status === "unchanged" ? 'title="Within normal variation"' : ""}>${text}</span>`;
+}
+function metricTable(rows) {
+  const groups = [...new Set(rows.map((m) => m.group))];
+  return groups.map((g) => `<div class="card"><h3 style="margin-top:0">${esc(g)}</h3><table class="metric-list"><thead><tr><th>Metric</th><th>Before</th><th>After</th><th>Change</th></tr></thead><tbody>
+    ${rows.filter((m) => m.group === g).map((m) => `<tr><td>${esc(m.label)}</td><td>${metricValue(m.before, m.unit)}</td><td><b>${metricValue(m.after, m.unit)}</b></td><td>${changeCell(m)}</td></tr>`).join("")}</tbody></table></div>`).join("");
+}
+const issueLine = (i, note) => `<li>${sev(i.severity)} ${esc(i.title)} <span class="muted small">${esc(note)}</span></li>`;
+
+async function renderGrowth(el, r, s) {
+  el.innerHTML = `<div id="g-audits"><p class="muted">Comparing…</p></div><div id="g-periods"></div>`;
+  await loadAuditCompare(s);
+  if (!s.first_look) await loadPeriodCompare(s, 28);
+}
+
+async function loadAuditCompare(s, base, current) {
+  const host = $("#g-audits");
+  destroyCharts();
+  const q = base && current ? `?base=${base}&current=${current}` : "";
+  const d = await api(`/api/sites/${s.id}/compare${q}`);
+  if (!d.available) {
+    host.innerHTML = `<div class="card"><h3 style="margin-top:0">One more audit needed</h3><p>A comparison needs two completed audits. This website has ${d.audits.length}. Click <b>Run audit</b> to take the next snapshot.</p></div>`;
+    return;
+  }
+  const options = (sel) => d.audits.map((a) => `<option value="${a.id}" ${a.id === sel ? "selected" : ""}>${esc(shortDateTime(a.started_at))} · score ${a.score ?? "–"} · ${a.pages_crawled ?? "?"} URLs</option>`).join("");
+  const iss = d.issues;
+  host.innerHTML = `
+    <div class="card row"><div><label>Compare</label><select id="g-base">${options(d.base)}</select></div>
+      <div><label>With</label><select id="g-current">${options(d.current)}</select></div></div>
+    ${d.warnings.map((w) => `<div class="card notice">${esc(w)}</div>`).join("")}
+    <div class="grid g4" style="margin-top:16px">
+      <div class="card kpi"><div class="l">Overall trend</div><div class="v ${VERDICT_CLASS[d.verdict]}">${esc(d.verdict)}</div></div>
+      <div class="card kpi"><div class="l">Score</div><div class="v">${d.score_before} → ${d.score_after}</div><div class="small ${d.score_change > 0 ? "ok" : d.score_change < 0 ? "bad" : "muted"}">${d.score_change > 0 ? "▲ +" : d.score_change < 0 ? "▼ " : ""}${d.score_change || "No change"}</div></div>
+      <div class="card kpi"><div class="l">Metrics improved</div><div class="v ok">${d.improved}</div></div>
+      <div class="card kpi"><div class="l">Metrics declined</div><div class="v bad">${d.declined}</div></div>
+    </div>
+    <div class="grid g2" style="margin-top:16px">
+      <div class="card"><h3>Score over time</h3><div class="chart-box"><canvas id="c-trend"></canvas></div></div>
+      <div class="card"><h3>Score by category</h3><div class="chart-box"><canvas id="c-compare"></canvas></div></div>
+    </div>
+    <h2>Metrics</h2><div class="grid g2">${metricTable(d.metrics)}</div>
+    <h2>Issues</h2><div class="grid g2">
+      <div class="card"><h3 class="bad" style="margin-top:0">New or worse (${iss.new.length + iss.worse.length})</h3><ul>${iss.new.map((i) => issueLine(i, `new, ${i.count} affected`)).join("")}${iss.worse.map((i) => issueLine(i, `${i.before} → ${i.after} affected`)).join("") || (iss.new.length ? "" : "<li class='muted'>None</li>")}</ul></div>
+      <div class="card"><h3 class="ok" style="margin-top:0">Resolved or better (${iss.resolved.length + iss.better.length})</h3><ul>${iss.resolved.map((i) => issueLine(i, "resolved")).join("")}${iss.better.map((i) => issueLine(i, `${i.before} → ${i.after} affected`)).join("") || (iss.resolved.length ? "" : "<li class='muted'>None</li>")}</ul></div>
+    </div>
+    <h2>Page changes</h2><p class="muted small">${d.page_tally.declined || 0} got worse, ${d.page_tally.improved || 0} got better, and ${d.page_tally.neutral || 0} changed without a clear direction.</p><div id="t-pc"></div>`;
+  const onPick = () => { const a = +$("#g-base").value, b = +$("#g-current").value; if (a === b) { toast("Choose two different audits"); return; } loadAuditCompare(s, a, b).catch((e) => toast(e.message)); };
+  $("#g-base").onchange = onPick; $("#g-current").onchange = onPick;
+  chart("c-trend", { type: "line", data: { labels: d.audits.map((a) => shortDate(a.started_at)), datasets: [{ label: "Score", data: d.audits.map((a) => a.score), borderColor: C.navy, tension: .25 }] }, options: { scales: { y: { suggestedMin: 0, suggestedMax: 100 } } } });
+  const cats = d.metrics.filter((m) => m.group === "Score" && m.label !== "Overall score");
+  chart("c-compare", { type: "bar", data: { labels: cats.map((m) => m.label), datasets: [{ label: "Before", data: cats.map((m) => m.before), backgroundColor: "#a9b8c9", borderRadius: 3 }, { label: "After", data: cats.map((m) => m.after), backgroundColor: C.navy, borderRadius: 3 }] }, options: { scales: { y: { beginAtZero: true, max: 100 } } } });
+  const stateLabel = { improved: "Better", declined: "Worse", neutral: "Changed" };
+  dataTable("t-pc", d.pages, [urlCol(), { key: "change", label: "What changed" }, { key: "status", label: "Direction", render: (v) => `<span class="${STATUS_CLASS[v] || "muted"}">${stateLabel[v]}</span>` },
+    { key: "before", label: "Before", render: (v) => v == null ? '<span class="muted">none</span>' : `<span class="small">${esc(v)}</span>` }, { key: "after", label: "After", render: (v) => v == null ? '<span class="muted">none</span>' : `<span class="small">${esc(v)}</span>` }]);
+}
+
+async function loadPeriodCompare(s, days) {
+  const host = $("#g-periods");
+  const d = await api(`/api/sites/${s.id}/compare/periods?days=${days}`);
+  if (!d.search.has_data && !d.traffic.has_data) {
+    host.innerHTML = `<h2>Traffic and rankings</h2><div class="card"><p>No Search Console or GA4 data yet. Click <b>Sync GSC/GA4</b> above, and clicks, rankings and sessions will be compared here.</p></div>`;
+    return;
+  }
+  const sections = [d.search, d.traffic].filter((x) => x.has_data);
+  const w = sections[0].window;
+  host.innerHTML = `<div class="row space"><h2>Traffic and rankings</h2><div class="row"><label>Period</label><select id="g-days">${[7, 28, 90].map((n) => `<option value="${n}" ${n === d.days ? "selected" : ""}>Last ${n} days</option>`).join("")}</select></div></div>
+    <p class="muted small">${esc(w.current[0])} to ${esc(w.current[1])}, compared with ${esc(w.previous[0])} to ${esc(w.previous[1])}.</p>
+    ${sections.some((x) => x.partial) ? `<div class="card notice">Not enough history to fill the earlier period, so its totals are low and growth looks larger than it is. Sync more days or choose a shorter period.</div>` : ""}
+    <div class="grid g2">${metricTable(sections.flatMap((x) => x.metrics))}</div>
+    ${d.search.has_data ? `<p class="small">${d.search.keywords_won} keywords started ranking and ${d.search.keywords_lost} stopped.</p>
+      <div class="grid g2"><div><h3>Queries gaining clicks</h3><div id="t-qg"></div></div><div><h3>Queries losing clicks</h3><div id="t-ql"></div></div>
+      <div><h3>Pages gaining clicks</h3><div id="t-pg"></div></div><div><h3>Pages losing clicks</h3><div id="t-pl"></div></div></div>` : ""}
+    ${d.traffic.has_data ? `<div class="grid g2"><div><h3>Landing pages gaining sessions</h3><div id="t-lg"></div></div><div><h3>Landing pages losing sessions</h3><div id="t-ll"></div></div></div>` : ""}`;
+  $("#g-days").onchange = (e) => loadPeriodCompare(s, +e.target.value).catch((err) => toast(err.message));
+  const moved = (id, rows, label, render) => dataTable(id, rows, [{ key: "item", label, render }, { key: "before", label: "Before" }, { key: "after", label: "After" },
+    { key: "change", label: "Change", render: (v) => `<span class="${v > 0 ? "ok" : "bad"}">${v > 0 ? "+" : ""}${esc(v)}</span>` }], { noFilter: true, limit: 15 });
+  const pageCell = (v) => /^https?:/i.test(v) ? link(v, shortUrl(v)) : esc(v);
+  if (d.search.has_data) {
+    moved("t-qg", d.search.queries.gainers, "Query"); moved("t-ql", d.search.queries.losers, "Query");
+    moved("t-pg", d.search.pages.gainers, "Page", pageCell); moved("t-pl", d.search.pages.losers, "Page", pageCell);
+  }
+  if (d.traffic.has_data) { moved("t-lg", d.traffic.pages.gainers, "Landing page", pageCell); moved("t-ll", d.traffic.pages.losers, "Landing page", pageCell); }
 }
 
 function renderCrawl(el, r) {

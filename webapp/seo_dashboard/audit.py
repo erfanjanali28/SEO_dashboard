@@ -14,6 +14,7 @@ from .crawler import crawl
 from .integrations import dataforseo
 
 _running: dict[int, threading.Thread] = {}
+METHOD_VERSION = 2       # raise when scoring changes, so comparisons can say so
 FIRST_LOOK_DELAY = 1.0   # seconds between requests to a site we do not manage
 FIRST_LOOK_UNMEASURED = ("Performance", "Tracking & CRO")
 
@@ -123,7 +124,7 @@ def build_result(site: dict, progress=None, live_keywords: bool = True, run_psi:
         })
     return {
         "meta": {"site_url": site["url"], "origin": cr.origin, "pages_crawled": len(cr.pages), "html_pages": len(ok),
-                 "generated_at": db.now_iso(), "industry": site.get("industry"), "crawl_errors": cr.errors},
+                 "generated_at": db.now_iso(), "industry": site.get("industry"), "crawl_errors": cr.errors, "method": METHOD_VERSION},
         "scores": sc, "issues": sorted(issues, key=lambda i: -priorities.priority_value(i, len(ok))),
         "top10": top10, "roadmap": plan,
         "technical": tech["stats"], "content": cont["stats"],

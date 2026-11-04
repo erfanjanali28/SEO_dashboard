@@ -98,3 +98,5 @@ pre { background: var(--soft); padding: 12px; border-radius: 8px; white-space: p
 .metric-list { width: 100%; border-collapse: collapse; }
 .metric-list td { padding: 4px 8px 4px 0; border-bottom: 1px solid var(--border); }
 .rules { max-height: 280px; overflow: auto; font-size: 12px; white-space: pre; background: var(--soft); padding: 10px; border-radius: 6px; }
+.notice { margin-top: 12px; border-left: 4px solid var(--amber); }
+.metric-list th { text-align: left; font-size: 12px; color: var(--muted); font-weight: 600; padding: 4px 8px 4px 0; }

@@ -280,7 +280,7 @@ def full_report_xlsx(result: dict, client: dict, site: dict, history: list[dict]
     ws = wb.create_sheet("Conversion Tracking")
     conv = result["conversion"]
     first, last = table(ws, conv["events"], [("priority", "Priority"), ("page_url", "Page URL"), ("event_name", "GA4 event"), ("element", "Element"),
-                                             ("gtm_trigger", "GTM trigger"), ("parameters", "Parameters"), ("key_event", "Key event"), ("why", "Why")],
+                                             ("gtm_trigger", "GTM trigger"), ("parameters", "Parameters"), ("key_event", "Key event"), ("pages", "Pages"), ("why", "Why")],
                         widths={"gtm_trigger": 55, "element": 45})
     ev = Counter(e["event_name"] for e in conv["events"])
     nxt = _counter_block(ws, dict(ev.most_common(15)), 1, 10, ("Event", "Placements"), title="Recommended events", horizontal=True)

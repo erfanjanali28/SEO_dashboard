@@ -48,6 +48,7 @@ python webapp/run.py            # http://127.0.0.1:8000
 | Tab | Contents |
 |---|---|
 | Overview | Overall and category scores, severity mix, score history, status codes, new and resolved issues |
+| Growth & Decline | Any two audits side by side: trend verdict, score, every metric with before, after and change, new and resolved issues, and per-page changes. Search Console and GA4 period comparison with top gaining and losing queries and pages |
 | Top 10 & Roadmap | Priority actions ranked by severity × impact × reach ÷ effort; 30/60/90-day plan with owners and KPIs |
 | Technical | 404s with suggested 301 targets, broken links, redirect chains and 302s, noindex, robots.txt, canonicals, duplicate URLs, URL variants, XML sitemaps, llms.txt, HTTPS, mixed content, security headers, mobile viewport, JavaScript rendering (content missing from the initial HTML), TTFB, compression |
 | On-page & Meta | Title, meta description and H1 problems; per-page target keyword, secondary keywords, and suggested title and description with the source URL |

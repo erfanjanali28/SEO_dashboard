@@ -157,11 +157,11 @@ def meta_suggestions(crawl, kw_map: dict) -> list[dict]:
         if title and primary not in title.lower():
             reasons.append(f"primary keyword '{primary}' not in title")
         if not desc:
-            reasons.append("missing meta description")
+            reasons.append(f"no meta description, so write one around '{primary}'")
         elif not 70 <= len(desc) <= 160:
-            reasons.append(f"description length {len(desc)}")
+            reasons.append(f"description is {len(desc)} characters (aim for 70–160)")
         elif primary.split()[0] not in desc.lower():
-            reasons.append("keyword absent from description")
+            reasons.append(f"'{primary}' is missing from the description")
         if not reasons:
             continue
         head = (p.get("h1") or [title or primary])[0]

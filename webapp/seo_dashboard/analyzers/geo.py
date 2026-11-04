@@ -10,83 +10,126 @@ Produces a written brief the team can act on.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from urllib.parse import urlparse
 
 from . import html_pages, indexable, issue
 from .content import UTILITY
+from .conversion import page_type
+from .keywords import _brand
+from .technical import suggest_schema_type
+
+BOILERPLATE_SHARE = 0.3      # a question on this share of pages comes from the template
 
 
-def page_score(p: dict) -> tuple[int, list[str], list[str]]:
+def _plain_heading(p: dict, boilerplate: frozenset) -> str | None:
+    """The first H2 or H3 of the page's own content that is not already a question."""
+    return next((h["text"] for h in p.get("headings", [])
+                 if h["level"] in (2, 3) and "?" not in h["text"] and h["text"] not in boilerplate), None)
+
+
+def _topic(p: dict) -> str:
+    """What the page is about, without the brand part of a title."""
+    text = (p.get("h1") or [None])[0] or p.get("title") or "this topic"
+    return re.split(r"\s[|–—]\s", text)[0][:70]
+
+
+def _author_fix(p: dict, topic: str) -> str:
+    kind = page_type(p)
+    if kind == "blog/article":
+        return f"Add a byline to '{topic}' with the writer's credentials, plus Person schema."
+    return f"Show who stands behind '{topic}': a named specialist, team or company credentials."
+
+
+def page_score(p: dict, boilerplate: frozenset = frozenset()) -> tuple[int, list[str], list[str]]:
+    """Score one page. ``boilerplate`` holds headings that come from the site template."""
     score, good, fixes = 0, [], []
     sections = p.get("sections", [])
-    qh = p.get("question_headings", [])
+    qh = [q for q in p.get("question_headings", []) if q not in boilerplate]
+    topic = _topic(p)
+    words = p.get("word_count", 0)
+    paragraphs = [s["words"] for s in sections if s["kind"] == "p"]
     answer_blocks = [s for s in sections if s["kind"] == "p" and 25 <= s["words"] <= 80]
     if qh:
         score += 15
-        good.append(f"{len(qh)} question-style headings")
+        good.append(f"{len(qh)} question heading{'s' if len(qh) != 1 else ''}, such as '{qh[0][:50]}'")
     else:
-        fixes.append("Phrase 2–4 H2/H3s as the questions users ask (e.g. 'How much does X cost?').")
+        plain = _plain_heading(p, boilerplate)
+        fixes.append(f"Reword the heading '{plain[:70]}' as a question a customer would ask." if plain
+                     else f"Add 2–4 question headings about '{topic}'; the page has none to reword.")
     if answer_blocks:
         score += 20
-        good.append(f"{len(answer_blocks)} concise answer paragraphs (25–80 words)")
+        good.append(f"{len(answer_blocks)} of {len(paragraphs)} paragraphs are quotable (25–80 words)")
+    elif qh:
+        fixes.append(f"Under '{qh[0][:70]}', add a direct 40–60 word answer before any detail.")
+    elif paragraphs:
+        fixes.append(f"Its {len(paragraphs)} paragraph{'s' if len(paragraphs) != 1 else ''} run {min(paragraphs)}–{max(paragraphs)} words, so none is a quotable answer. Add a 40–60 word summary of '{topic}'.")
     else:
-        fixes.append("Put a 40–60 word direct answer right under each question heading, and lead with the answer.")
+        fixes.append(f"There is no paragraph text under the headings. Add a 40–60 word answer about '{topic}'.")
     fp = p.get("first_paragraph", "")
-    if 20 <= len(fp.split()) <= 70:
+    intro = len(fp.split())
+    if 20 <= intro <= 70:
         score += 10
-        good.append("intro summarizes the topic concisely")
+        good.append(f"{intro}-word intro summarizes the topic")
+    elif not fp:
+        fixes.append(f"No intro paragraph. Open with 1–2 sentences that define '{topic}' and state the key takeaway.")
+    elif intro < 20:
+        fixes.append(f"The intro is only {intro} words. Expand it to 1–2 sentences defining '{topic}'.")
     else:
-        fixes.append("Open with a 1–2 sentence TL;DR that defines the topic and states the key takeaway.")
+        fixes.append(f"The intro runs {intro} words. Cut it below 70 so it can be quoted on its own.")
     if p.get("lists") or p.get("tables"):
         score += 10
-        good.append("uses lists/tables")
+        good.append(f"{(p.get('lists') or 0) + (p.get('tables') or 0)} lists or tables")
     else:
-        fixes.append("Add a bulleted list, numbered steps or a comparison table. These are easy to extract.")
+        fixes.append(f"{words} words with no list or table. Put the main points about '{topic}' in one.")
     text = p.get("text", "")
     stats = len(re.findall(r"\b\d+(?:\.\d+)?\s?(?:%|percent|million|billion|x\b)", text))
     if stats >= 2:
         score += 10
         good.append(f"{stats} statistics")
     else:
-        fixes.append("Add specific, sourced statistics and numbers. LLMs prefer quotable facts.")
+        found = f"Only {stats} figure" if stats else "No figures"
+        fixes.append(f"{found} in {words} words. Add sourced numbers about '{topic}', which AI answers can quote.")
     ext = [l for l in p.get("external_links", []) if not l["nav"]]
     if ext:
         score += 5
-        good.append("cites external sources")
+        good.append(f"{len(ext)} outbound source link{'s' if len(ext) != 1 else ''}")
     else:
-        fixes.append("Cite 2–3 authoritative sources inline.")
+        fixes.append(f"No outbound links in the body. Cite 2–3 sources that back up the claims about '{topic}'.")
     if p.get("author_signals"):
         score += 10
         good.append("author attribution")
     else:
-        fixes.append("Add an author byline with credentials and Person schema (E-E-A-T).")
+        fixes.append(_author_fix(p, topic))
     if p.get("dates", {}).get("modified") or p.get("dates", {}).get("published"):
         score += 5
         good.append("dated content")
     else:
-        fixes.append("Show a visible 'Last updated' date and add dateModified to the schema.")
+        fixes.append(f"Nothing shows when '{topic}' was last updated. Add a visible date and dateModified in the schema.")
     if p.get("schema"):
         score += 10
-        good.append("structured data present")
+        good.append(f"{len(p['schema'])} structured data block{'s' if len(p['schema']) != 1 else ''}")
     else:
-        fixes.append("Add JSON-LD (Article/Product/Service + Organization + BreadcrumbList).")
+        fixes.append(f"'{topic}' has no structured data. Add {suggest_schema_type(p)} JSON-LD.")
     if p.get("word_count", 0) >= 600:
         score += 5
     if not p.get("spa_shell"):
         score += 0
     else:
         score -= 20
-        fixes.insert(0, "Server-render the content. Most AI crawlers do not execute JavaScript.")
+        fixes.insert(0, f"Only {words} words are in the initial HTML. Server-render '{topic}', because most AI crawlers do not run JavaScript.")
     return max(0, min(100, score)), good, fixes
 
 
 def analyze(crawl, research: dict | None = None) -> dict:
     pages = [p for p in html_pages(crawl.pages) if indexable(p) and not UTILITY.search(urlparse(p["url"]).path)]
+    seen_on = Counter(t for p in pages for t in {h["text"] for h in p.get("headings", [])} | set(p.get("question_headings", [])))
+    boilerplate = frozenset(t for t, n in seen_on.items() if n >= 3 and n >= len(pages) * BOILERPLATE_SHARE)
     scored = []
     for p in pages:
-        s, good, fixes = page_score(p)
+        s, good, fixes = page_score(p, boilerplate)
         scored.append({"url": p["url"], "title": p.get("title"), "score": s, "strengths": good, "fixes": fixes[:5],
-                       "question_headings": p.get("question_headings", [])[:6]})
+                       "question_headings": [q for q in p.get("question_headings", []) if q not in boilerplate][:6]})
     scored.sort(key=lambda x: x["score"])
     avg = round(sum(s["score"] for s in scored) / len(scored)) if scored else 0
 
@@ -107,12 +150,18 @@ def analyze(crawl, research: dict | None = None) -> dict:
         {"check": "No nosnippet / max-snippet:0 restrictions", "ok": not any("nosnippet" in (p.get("meta_robots") or "").lower() or "max-snippet:0" in (p.get("meta_robots") or "").lower() for p in pages),
          "detail": "Snippet controls also exclude the page from AI Overviews"},
     ]
-    questions = (research or {}).get("questions", [])[:40]
+    brand = re.sub(r"\W+", "", _brand(crawl).lower())
+    # "why acme" comes from adding question words to the brand name. Nobody searches that.
+    questions = [q for q in (research or {}).get("questions", []) if len(brand) < 4 or brand not in re.sub(r"\W+", "", q.lower())][:40]
     q_map = []
     for q in questions:
         kw = next((k for k in (research or {}).get("keywords", []) if k["keyword"] == q), None)
-        q_map.append({"question": q, "target_url": kw.get("target_url") if kw else None,
-                      "action": "Add a Q&A section to the target page" if kw and kw.get("target_url") else "Create a dedicated answer page or FAQ section"})
+        target = kw.get("target_url") if kw else None
+        slug = kw.get("suggested_slug") if kw else None
+        q_map.append({"question": q, "target_url": target,
+                      "action": f"Add '{q}' as a heading on {urlparse(target).path or '/'} with a 40–60 word answer." if target
+                      else f"No page answers '{q}'. Create {slug}, or add it to an FAQ." if slug
+                      else f"No page answers '{q}'. Add it to an FAQ."})
 
     issues = []
     weak = [s for s in scored if s["score"] < 50]
