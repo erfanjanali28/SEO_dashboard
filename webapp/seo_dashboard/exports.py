@@ -178,6 +178,25 @@ def full_report_xlsx(result: dict, client: dict, site: dict, history: list[dict]
     table(ws, redir, [("from", "Broken URL"), ("status", "Status"), ("to", "Suggested 301 target"), ("confidence", "Match confidence"),
                       ("linked_from", "Linked from")], widths={"from": 60, "to": 60, "linked_from": 80})
 
+    plan = result.get("redirects")
+    if plan:
+        ws = wb.create_sheet("Redirect Plan")
+        table(ws, plan["redirects"], [("from", "From URL"), ("action", "Action"), ("to", "Target URL"), ("confidence", "Confidence"), ("source", "Why it was flagged"),
+                                      ("keyword", "Keyword"), ("inlinks", "Inlinks"), ("reason", "Reason")], widths={"from": 60, "to": 60, "reason": 80})
+        ws = wb.create_sheet("Canonical Plan")
+        table(ws, plan["canonicals"], [("url", "Page"), ("problem", "Problem"), ("current", "Current canonical"), ("target", "Suggested canonical"), ("priority", "Priority"),
+                                       ("confidence", "Confidence"), ("reason", "Reason"), ("tag", "Tag")], widths={"url": 60, "current": 60, "target": 60, "reason": 70})
+        ws = wb.create_sheet("Cannibalization Decisions")
+        table(ws, plan["decisions"], [("keyword", "Keyword"), ("winner", "Primary page"), ("other", "Competing page"), ("action", "Decision"), ("similarity", "Shared text"),
+                                      ("why", "Why"), ("winner_evidence", "Primary page evidence"), ("other_evidence", "Competing page evidence"), ("source", "Source")],
+              widths={"winner": 60, "other": 60, "why": 70})
+        ws = wb.create_sheet("Link Updates")
+        table(ws, plan["link_updates"], [("kind", "Change"), ("pages", "Pages"), ("current", "Current target"), ("new", "New target"), ("anchor", "Anchor"), ("why", "Why"), ("sources", "On pages")],
+              widths={"sources": 80, "current": 60, "new": 60, "why": 70})
+        ws = wb.create_sheet("Keyword Stuffing")
+        table(ws, plan["stuffing"], [("url", "URL"), ("keyword", "Keyword"), ("where", "Where"), ("occurrences", "Occurrences"), ("density", "Density %"),
+                                     ("severity", "severity"), ("recommendation", "Recommendation")], widths={"url": 60, "recommendation": 70})
+
     ws = wb.create_sheet("Broken Links")
     table(ws, result["technical"]["broken_links"], [("source", "Source URL"), ("target", "Broken target"), ("status", "Status"),
                                                     ("anchor", "Anchor"), ("internal", "Internal")])

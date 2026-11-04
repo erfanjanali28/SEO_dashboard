@@ -145,7 +145,7 @@ def analyze(crawl) -> dict:
     status_counts = defaultdict(int)
     for p in pages.values():
         s = p.get("status")
-        bucket = "error" if s is None else f"{s // 100}xx"
+        bucket = "skipped" if p.get("skipped_by_robots") else "error" if s is None else f"{s // 100}xx"
         status_counts[bucket] += 1
     not_found = [p for p in pages.values() if p.get("status") in (404, 410)]
     server_err = [p["url"] for p in pages.values() if p.get("status") and p["status"] >= 500]

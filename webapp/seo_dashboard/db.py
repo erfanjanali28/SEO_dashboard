@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS clients (
     industry TEXT,
     notes TEXT,
     photo TEXT,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'client'
 );
 CREATE TABLE IF NOT EXISTS sites (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -124,7 +125,19 @@ def conn():
 def init_db() -> None:
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     with conn() as c:
+        has_kind = 'kind' in {r['name'] for r in c.execute("PRAGMA table_info(clients)")}
+        if not has_kind and c.execute("SELECT 1 FROM sqlite_master WHERE name = 'clients'").fetchone():
+            c.execute("ALTER TABLE clients ADD COLUMN kind TEXT NOT NULL DEFAULT 'client'")
         c.executescript(SCHEMA)
+
+
+def first_look_client_id() -> int:
+    """Hidden client that owns first-look sites, which are not our projects."""
+    existing = row("SELECT id FROM clients WHERE kind = 'first_look'")
+    if existing:
+        return existing["id"]
+    return execute("INSERT INTO clients(name, notes, created_at, kind) VALUES(?, ?, ?, 'first_look')",
+                   ("First look", "Websites reviewed from the outside. Not managed projects.", now_iso()))
 
 
 def rows(sql: str, params: tuple = ()) -> list[dict]:

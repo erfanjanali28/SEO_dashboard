@@ -357,6 +357,7 @@ def extract_page(html: str, url: str, headers: dict) -> dict:
     paragraphs = [_text_of(p) for p in main.find_all("p")]
     paragraphs = [p for p in paragraphs if len(p) > 20]
     page["paragraphs"] = len(paragraphs)
+    page["prose"] = " ".join(paragraphs)[:MAX_TEXT_CHARS]
     page["avg_paragraph_words"] = round(sum(len(p.split()) for p in paragraphs) / len(paragraphs), 1) if paragraphs else 0
     page["first_paragraph"] = paragraphs[0][:400] if paragraphs else ""
     page["text_html_ratio"] = round(len(full_text) / max(len(html), 1) * 100, 1)
@@ -458,8 +459,14 @@ def _check_llms(origin: str) -> dict:
     return info
 
 
-def crawl(start_url: str, max_pages: int = 150, progress=None, check_external: int = 80) -> CrawlResult:
-    """Crawl a site breadth-first from ``start_url`` up to ``max_pages`` HTML pages."""
+def crawl(start_url: str, max_pages: int = 150, progress=None, check_external: int = 80,
+          respect_robots: bool = False, delay: float = 0.0) -> CrawlResult:
+    """Crawl a site breadth-first from ``start_url`` up to ``max_pages`` HTML pages.
+
+    ``respect_robots`` is for sites we do not manage: disallowed URLs are recorded
+    but never fetched, and ``delay`` (or a longer robots Crawl-delay, capped at 10
+    seconds) is waited between requests.
+    """
     start = normalize_url(start_url if "://" in start_url else f"https://{start_url}")
     # Resolve the canonical origin (http->https, apex->www) first.
     probe = fetch(start)
@@ -480,6 +487,13 @@ def crawl(start_url: str, max_pages: int = 150, progress=None, check_external: i
     robots = _parse_robots(origin)
     rp = robots.pop("_parser")
     result.robots = robots
+    pause = delay
+    if respect_robots and robots.get("exists"):
+        pause = min(max(delay, float(rp.crawl_delay("*") or 0)), 10.0)
+
+    def disallowed(url: str) -> bool:
+        return bool(respect_robots and robots.get("exists") and not (rp.can_fetch("Googlebot", url) and rp.can_fetch("*", url)))
+
     report("Reading XML sitemaps")
     result.sitemaps = _sitemap_urls(origin, robots.get("sitemaps", []))
     report("Checking llms.txt")
@@ -499,6 +513,15 @@ def crawl(start_url: str, max_pages: int = 150, progress=None, check_external: i
         if SKIP_EXT.search(urlparse(url).path):
             continue
         blocked = not rp.can_fetch("Googlebot", url) if robots.get("exists") else False
+        if disallowed(url):
+            result.pages[url] = {
+                "url": url, "status": None, "final_url": url, "redirect_chain": [], "final_status": None, "elapsed_ms": None,
+                "size": 0, "error": None, "depth": depth, "found_via": parent or "crawl", "blocked_by_robots": blocked,
+                "skipped_by_robots": True, "content_type": "", "security_headers": {}, "in_sitemap": url in set(result.sitemaps.get("urls", [])),
+            }
+            continue
+        if pause and crawled:
+            time.sleep(pause)
         res = fetch(url)
         crawled += 1
         if crawled % 5 == 0 or crawled == 1:
@@ -546,13 +569,17 @@ def crawl(start_url: str, max_pages: int = 150, progress=None, check_external: i
 
     # Check status of internal links we did not crawl (limit) and a sample of externals
     report("Checking link targets")
-    pending = [u for u in inlinks if u not in result.pages and not SKIP_EXT.search(urlparse(u).path)][:60]
+    pending = [u for u in inlinks if u not in result.pages and not SKIP_EXT.search(urlparse(u).path) and not disallowed(u)][:60]
+    if respect_robots and not any(p.get("status") for p in result.pages.values()):
+        raise RuntimeError("robots.txt does not allow crawling this site, so nothing was fetched.")
     externals = []
     for page in result.pages.values():
         for link in page.get("external_links", []):
             if link["href"] not in externals:
                 externals.append(link["href"])
     for u in pending + externals[:check_external]:
+        if pause and u in pending:
+            time.sleep(pause)
         res = fetch(u, method="HEAD", follow=False)
         status = res["status"]
         if status in (403, 405, 501) or status is None and not (res["error"] or "").startswith("blocked"):

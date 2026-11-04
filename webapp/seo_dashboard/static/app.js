@@ -95,6 +95,7 @@ async function route() {
   const m = h.match(/^\/(client|site)\/(\d+)(?:\/(\w+))?/);
   try {
     if (h === "/settings") await viewSettings();
+    else if (h === "/first-look") await viewFirstLook();
     else if (m && m[1] === "client") await viewClient(+m[2]);
     else if (m && m[1] === "site") await viewSite(+m[2], m[3] || "overview");
     else await viewClients();
@@ -124,6 +125,61 @@ async function viewClients() {
   $("#add-client").onclick = () => clientForm();
 }
 function shortHost(u) { try { return new URL(u).host; } catch { return u; } }
+
+/* ---------------- First look: websites that are not our projects ---------------- */
+async function viewFirstLook() {
+  const sites = await api("/api/first-look");
+  const running = sites.some((s) => s.status === "running");
+  app.innerHTML = `
+    <h1>First look</h1>
+    <p class="muted">Review a website you do not manage, using only what a crawler can see from outside. These sites stay out of Clients, are never scheduled, and use none of your Search Console, GA4 or paid API data. Crawls obey robots.txt and wait at least 1 second between requests.</p>
+    <form id="fl" class="card">
+      <label>Websites (one per line)</label><textarea name="urls" rows="3" required placeholder="example.com&#10;competitor.cz"></textarea>
+      <div class="row" style="margin-top:10px"><div><label>Pages per crawl</label><select name="max_pages">${[25, 50, 100, 250, 500].map((n) => `<option value="${n}" ${n === 100 ? "selected" : ""}>${n}</option>`).join("")}</select></div>
+      <button class="btn gold" type="submit" style="align-self:flex-end">Start first look</button></div>
+      <p class="muted small">At 1 second per page, 100 pages takes about 2 minutes.</p>
+    </form>
+    <h2>Reviewed websites</h2>
+    <div class="grid g2">${sites.map((s) => `
+      <div class="card"><div class="row space"><h3 style="margin:0">${link(s.url, shortHost(s.url))}</h3>${badge(s.score)}</div>
+        <p class="muted small">Last run: ${fmtDate(s.last_run_at)}${s.pages_crawled != null ? ` · ${s.pages_crawled} URLs crawled` : ""}${s.issues_critical != null ? ` · ${s.issues_critical} critical, ${s.issues_high} high` : ""}</p>
+        ${s.status === "running" ? `<p class="small"><b>Crawling:</b> ${esc(s.progress)}</p><div class="progress"><div></div></div>` : ""}
+        ${s.status === "error" ? `<p class="small bad">${esc((s.error || "").split("\n")[0].slice(0, 200))}</p>` : ""}
+        <div class="row" style="margin-top:8px"><a class="btn" href="#/site/${s.id}">Open</a>
+        <button class="btn secondary" data-rerun="${esc(s.url)}" data-pages="${s.max_pages}" ${s.status === "running" ? "disabled" : ""}>Run again</button>
+        <button class="btn danger" data-del="${s.id}" data-host="${esc(shortHost(s.url))}">Remove</button></div></div>`).join("") || '<div class="card"><p>Nothing reviewed yet. Add a website above.</p></div>'}</div>`;
+  $("#fl").onsubmit = async (e) => {
+    e.preventDefault();
+    const d = new FormData(e.target);
+    const urls = String(d.get("urls")).split(/[\s,]+/).filter(Boolean);
+    const failed = [];
+    for (const url of urls) {
+      try { await api("/api/first-look", { method: "POST", body: { url, max_pages: parseInt(d.get("max_pages"), 10) } }); }
+      catch (err) { failed.push(`${url}: ${err.message}`); }
+    }
+    if (failed.length) toast(failed.join(" "), 8000);
+    route();
+  };
+  document.querySelectorAll("[data-rerun]").forEach((b) => b.onclick = async () => {
+    await api("/api/first-look", { method: "POST", body: { url: b.dataset.rerun, max_pages: parseInt(b.dataset.pages, 10) } }); route();
+  });
+  document.querySelectorAll("[data-del]").forEach((b) => b.onclick = async () => {
+    if (confirm(`Remove ${b.dataset.host} and its results?`)) { await api(`/api/sites/${b.dataset.del}`, { method: "DELETE" }); route(); }
+  });
+  if (running) pollTimer = setInterval(async () => {
+    if (location.hash !== "#/first-look") return clearInterval(pollTimer);
+    const now = await api("/api/first-look");
+    if (!now.some((s) => s.status === "running")) { clearInterval(pollTimer); toast("First look complete"); route(); }
+    else now.forEach((s) => { if (s.status === "running") { const el = [...document.querySelectorAll("[data-rerun]")].find((b) => b.dataset.rerun === s.url); const p = el && el.closest(".card").querySelector("p.small b"); if (p) p.parentElement.innerHTML = `<b>Crawling:</b> ${esc(s.progress)}`; } });
+  }, 2500);
+}
+
+function firstLookCard(f) {
+  const cls = { good: "ok", warn: "warn", bad: "bad", info: "" };
+  return `<div class="card" style="margin-bottom:16px"><h2 style="margin-top:0">What a crawler can see</h2><div class="grid g2">${f.groups.map((g) => `<div><h3>${esc(g.name)}</h3>
+    <table class="metric-list">${g.items.map((i) => `<tr><td>${esc(i.label)}</td><td class="${cls[i.status] || ""}"><b>${esc(i.value)}</b></td><td class="muted small">${esc(i.detail)}</td></tr>`).join("")}</table></div>`).join("")}</div>
+    <p class="muted small" style="margin-top:12px"><b>Not visible from outside:</b> ${f.not_visible.map(esc).join("; ")}.</p></div>`;
+}
 
 function clientForm(c = {}) {
   modal(`<h2>${c.id ? "Edit" : "Add"} client</h2>
@@ -259,20 +315,24 @@ try { applyTheme(localStorage.getItem("theme") || ""); } catch {}
 
 /* ---------------- Site dashboard ---------------- */
 const TABS = [["overview", "Overview"], ["priorities", "Top 10 & Roadmap"], ["technical", "Technical"], ["onpage", "On-page & Meta"], ["content", "Content"],
-  ["links", "Internal Links"], ["structure", "URL Structure"], ["schema", "Schema"], ["performance", "Core Web Vitals"], ["keywords", "Keyword Research"],
+  ["links", "Internal Links"], ["redirects", "Redirects & Canonicals"], ["structure", "URL Structure"], ["schema", "Schema"], ["performance", "Core Web Vitals"], ["keywords", "Keyword Research"],
   ["search", "Rankings & Traffic"], ["geo", "AIO / GEO"], ["conversion", "Lead Gen & Tracking"], ["offpage", "Off-page"], ["crawl", "Crawl Data"]];
+const FIRST_LOOK_HIDDEN = new Set(["performance", "keywords", "search", "conversion", "offpage"]);
 
 async function viewSite(id, tab) {
   const s = await api(`/api/sites/${id}`);
   const c = s.client;
   const running = s.latest && s.latest.status === "running";
   const doneId = s.latest_done && s.latest_done.id;
+  const fl = s.first_look;
+  const tabs = fl ? TABS.filter(([k]) => !FIRST_LOOK_HIDDEN.has(k)) : TABS;
+  if (fl && FIRST_LOOK_HIDDEN.has(tab)) tab = "overview";
   app.innerHTML = `
-    <div class="card row">${avatar(c)}<div style="flex:1;min-width:220px"><div class="muted small"><a href="#/client/${c.id}">${esc(c.name)}</a></div>
+    <div class="card row">${avatar(c)}<div style="flex:1;min-width:220px"><div class="muted small"><a href="${fl ? "#/first-look" : `#/client/${c.id}`}">${esc(c.name)}</a></div>
       <h1 style="margin:2px 0">${link(s.url, shortHost(s.url))}</h1>
-      <div class="muted small">${esc(s.industry || "general")} ${s.location ? "· " + esc(s.location) : ""} · Schedule: ${s.interval_hours ? "every " + intervalLabel(s.interval_hours) : "manual"} · Last run: ${fmtDate(s.last_run_at)}</div></div>
+      <div class="muted small">${fl ? `Crawl data only · up to ${s.max_pages} pages` : `${esc(s.industry || "general")} ${s.location ? "· " + esc(s.location) : ""} · Schedule: ${s.interval_hours ? "every " + intervalLabel(s.interval_hours) : "manual"}`} · Last run: ${fmtDate(s.last_run_at)}</div></div>
       <div class="row"><button class="btn gold" id="run" ${running ? "disabled" : ""}>${running ? "Audit running…" : "Run audit"}</button>
-      <button class="btn secondary" id="sync">Sync GSC/GA4</button><button class="btn secondary" id="edit-site">Settings / schedule</button></div></div>
+      ${fl ? "" : `<button class="btn secondary" id="sync">Sync GSC/GA4</button><button class="btn secondary" id="edit-site">Settings / schedule</button>`}</div></div>
     ${running ? `<div class="card" style="margin-top:12px"><b>Audit in progress:</b> <span id="prog">${esc(s.latest.progress)}</span><div class="progress"><div></div></div></div>` : ""}
     ${s.latest && s.latest.status === "error" ? `<div class="card" style="margin-top:12px;border-color:var(--red)"><b class="bad">Last audit failed:</b><pre>${esc((s.latest.error || "").slice(0, 600))}</pre></div>` : ""}
     ${doneId ? `<div class="export-bar" style="margin-top:12px">
@@ -280,16 +340,16 @@ async function viewSite(id, tab) {
       <a class="btn" href="/api/audits/${doneId}/internal-links.xlsx">⬇ Internal links (Excel)</a>
       <a class="btn secondary" href="/api/audits/${doneId}/report.html" target="_blank" rel="noopener">Printable report / PDF</a>
       <a class="btn secondary" href="/api/audits/${doneId}/report.html?download=1">⬇ HTML report</a></div>` : ""}
-    <div class="tabs">${TABS.map(([k, l]) => `<button class="tab ${k === tab ? "active" : ""}" data-tab="${k}">${l}</button>`).join("")}</div>
+    <div class="tabs">${tabs.map(([k, l]) => `<button class="tab ${k === tab ? "active" : ""}" data-tab="${k}">${l}</button>`).join("")}</div>
     <div id="tab-body"></div>`;
   document.querySelectorAll(".tab").forEach((b) => b.onclick = () => location.hash = `#/site/${id}/${b.dataset.tab}`);
   $("#run").onclick = async () => { await api(`/api/sites/${id}/audit`, { method: "POST" }); route(); };
-  $("#sync").onclick = async () => {
+  if (!fl) $("#sync").onclick = async () => {
     toast("Syncing Search Console and GA4 from Windsor.ai…", 8000);
     try { const r = await api(`/api/sites/${id}/sync`, { method: "POST" }); toast(`Synced ${r.gsc_rows} Search Console rows (${r.accounts.gsc || "no site"}) and ${r.ga4_rows} GA4 rows (${r.accounts.ga4 || "no property"}). ${r.notes.concat(r.errors).join(" ")}`, 12000); if (tab === "search") route(); }
     catch (e) { toast(e.message, 8000); }
   };
-  $("#edit-site").onclick = () => siteForm(s);
+  if (!fl) $("#edit-site").onclick = () => siteForm(s);
   if (running) {
     pollTimer = setInterval(async () => {
       const a = await api(`/api/audits/${s.latest.id}`);
@@ -302,7 +362,7 @@ async function viewSite(id, tab) {
   if (!doneId) { body.innerHTML = `<div class="card"><p>No completed audit yet. ${running ? "Results appear here as soon as the crawl finishes." : "Click <b>Run audit</b> to crawl the site."}</p></div>`; return; }
   const r = await api(`/api/audits/${doneId}/result`);
   const renderers = { overview: renderOverview, priorities: renderPriorities, technical: renderTechnical, onpage: renderOnpage, content: renderContent,
-    links: renderLinks, structure: renderStructure, schema: renderSchema, performance: renderPerformance, keywords: renderKeywords, geo: renderGeo,
+    links: renderLinks, redirects: renderRedirects, structure: renderStructure, schema: renderSchema, performance: renderPerformance, keywords: renderKeywords, geo: renderGeo,
     conversion: renderConversion, offpage: renderOffpage, crawl: renderCrawl };
   (renderers[tab] || renderOverview)(body, r, s);
 }
@@ -320,7 +380,7 @@ async function renderOverview(el, r, s) {
   const sevc = { critical: 0, high: 0, medium: 0, low: 0 };
   r.issues.forEach((i) => sevc[i.severity]++);
   const changes = await api(`/api/sites/${s.id}/changes`).catch(() => ({ available: false }));
-  el.innerHTML = `
+  el.innerHTML = `${r.first_look ? firstLookCard(r.first_look) : ""}
     <div class="grid g4">
       <div class="card kpi"><div class="l">Overall score</div><div class="v">${badge(sc.overall)}</div>${changes.available ? `<div class="small ${changes.score_change >= 0 ? "ok" : "bad"}">${changes.score_change >= 0 ? "▲" : "▼"} ${Math.abs(changes.score_change)} vs previous audit</div>` : ""}</div>
       <div class="card kpi"><div class="l">URLs crawled</div><div class="v">${r.meta.pages_crawled}</div><div class="small muted">${r.technical.indexable} indexable</div></div>
@@ -665,6 +725,56 @@ function renderOffpage(el, r) {
   dataTable("t-pl", o.platforms, [{ key: "name", label: "Platform", render: (v, x) => x.url ? link(x.url, v) : esc(v) }, { key: "cost", label: "Cost" }, { key: "type", label: "Type" }, { key: "notes", label: "Notes" }]);
   dataTable("t-fp", o.footprints, [{ key: "keyword", label: "Keyword" }, { key: "type", label: "Type" }, { key: "query", label: "Search", render: (v, x) => link(x.google_url, v) }]);
   dataTable("t-pr", o.pr_sources, [{ key: "name", label: "Source", render: (v, x) => link(x.url, v) }, { key: "cost", label: "Cost" }, { key: "type", label: "Type" }]);
+}
+
+function confPill(v) { const map = { high: "sev-low", medium: "sev-medium", low: "sev-high" }; return `<span class="pill ${map[v] || ""}">${esc(v)}</span>`; }
+
+function renderRedirects(el, r, s) {
+  const p = r.redirects;
+  if (!p) { el.innerHTML = `<div class="card"><p>This audit ran before redirect and canonical suggestions existed. Click <b>Run audit</b> to generate them.</p></div>`; return; }
+  const m = p.summary;
+  const kpi = (label, value, note) => `<div class="card kpi"><div class="l">${label}</div><div class="v">${value}</div>${note ? `<div class="small muted">${note}</div>` : ""}</div>`;
+  el.innerHTML = `
+    <div class="grid g4">
+      ${kpi("301 redirects", m.redirects)}
+      ${kpi("410 (let go)", m.gone, "No equivalent page")}
+      ${kpi("Canonical fixes", m.canonical_fixes, `${m.canonical_missing} pages just need a self-canonical`)}
+      ${kpi("Keep both, differentiate", m.differentiate, "No redirect needed")}
+      ${kpi("Internal link updates", m.link_updates, `Across ${m.links_affected} links`)}
+      ${kpi("Keyword stuffing flags", m.stuffing)}
+      ${kpi("Already canonicalized", m.already_canonicalized, "Correct today")}
+      ${kpi("Search Console used", m.used_search_console ? "Yes" : "No", m.used_search_console ? "Clicks decide the primary page" : "Primary page chosen from crawl signals")}
+    </div>
+    <div class="card" style="margin-top:16px"><h3 style="margin-top:0">How these are decided</h3>
+      <p class="small"><b>301</b> when a URL is dead or truly the same page as another, with the target taken from anchor text, topic, URL similarity and the internal link suggestions.
+      <b>Canonical</b> when both URLs must stay reachable, such as parameter versions or one page in two folders.
+      <b>Keep both</b> when pages share a keyword but differ in intent or text. A redirect there would lose content, and a canonical would be ignored.
+      <b>410</b> when nothing similar exists, because redirecting to the home page counts as a soft 404.</p>
+      <p class="small bad"><b>Review before deploying.</b> These are suggestions from crawl data. Check every "Merge, then 301" by hand, and don't deploy "low" confidence rows without looking at both pages.</p></div>
+    <h2>Redirect plan</h2><div id="t-rd"></div>
+    <h2>Canonical plan</h2><div id="t-can"></div>
+    <h2>Keyword cannibalization decisions</h2><div id="t-dec"></div>
+    <h2>Internal links to update</h2><p class="muted small">Do these first, so nothing depends on the redirects.</p><div id="t-upd"></div>
+    <h2>Keyword stuffing guard</h2><p class="muted small">Density is a warning sign, not a Google metric. Use it to find repetitive copy, especially before merging pages.</p><div id="t-stuff"></div>
+    <h2>Server rules</h2><p class="muted small">High and medium confidence rows only.${p.rules.skipped ? ` ${p.rules.skipped} rows with query strings need a rewrite rule and are left out.` : ""}</p>
+    <div class="grid g2"><div class="card"><div class="row space"><h3 style="margin:0">Apache (.htaccess)</h3><button class="btn secondary" data-copy="apache">Copy</button></div><pre class="rules" id="r-apache"></pre></div>
+    <div class="card"><div class="row space"><h3 style="margin:0">nginx</h3><button class="btn secondary" data-copy="nginx">Copy</button></div><pre class="rules" id="r-nginx"></pre></div></div>`;
+  $("#r-apache").textContent = p.rules.apache || "Nothing to deploy.";
+  $("#r-nginx").textContent = p.rules.nginx || "Nothing to deploy.";
+  document.querySelectorAll("[data-copy]").forEach((b) => b.onclick = async () => {
+    try { await navigator.clipboard.writeText(p.rules[b.dataset.copy]); toast("Copied"); } catch { toast("Copy failed. Select the text instead."); }
+  });
+  const reason = (v) => `<span class="small">${esc(v)}</span>`;
+  dataTable("t-rd", p.redirects, [urlCol("from", "From"), { key: "action", label: "Action" }, { key: "to", label: "Target", render: (v) => v ? link(v, shortUrl(v)) : '<span class="muted">none</span>' },
+    { key: "confidence", label: "Confidence", render: confPill }, { key: "source", label: "Flagged by" }, { key: "inlinks", label: "Inlinks" }, { key: "reason", label: "Reason", render: reason }]);
+  dataTable("t-can", p.canonicals, [urlCol("url", "Page"), { key: "problem", label: "Problem" }, { key: "current", label: "Current", render: (v) => v ? link(v, shortUrl(v)) : '<span class="muted">none</span>' },
+    { key: "target", label: "Suggested canonical", render: (v) => v ? link(v, shortUrl(v)) : '<span class="muted">your call</span>' }, { key: "priority", label: "Priority", render: sev }, { key: "reason", label: "Reason", render: reason }]);
+  dataTable("t-dec", p.decisions, [{ key: "keyword", label: "Keyword" }, urlCol("winner", "Primary page"), urlCol("other", "Competing page"), { key: "action", label: "Decision" },
+    { key: "similarity", label: "Shared text", render: (v) => v == null ? "" : `${Math.round(v * 100)}%` }, { key: "why", label: "Why", render: reason }, { key: "source", label: "Source" }]);
+  dataTable("t-upd", p.link_updates, [{ key: "kind", label: "Change" }, { key: "sources", label: "On pages", render: (v) => `${link(v[0], shortUrl(v[0]))}${v.length > 1 ? `<div class="muted small">and ${v.length - 1} more</div>` : ""}` }, { key: "pages", label: "Pages" }, { key: "current", label: "Current target", render: (v) => v ? link(v, shortUrl(v)) : "" },
+    { key: "new", label: "New target", render: (v) => v ? link(v, shortUrl(v)) : '<span class="muted">remove</span>' }, { key: "anchor", label: "Anchor" }, { key: "why", label: "Why", render: reason }]);
+  dataTable("t-stuff", p.stuffing, [urlCol(), { key: "keyword", label: "Keyword" }, { key: "where", label: "Where" }, { key: "occurrences", label: "Count" },
+    { key: "density", label: "Density", render: (v) => v == null ? "" : `${v}%` }, { key: "severity", label: "Severity", render: sev }, { key: "recommendation", label: "Fix", render: reason }]);
 }
 
 function renderCrawl(el, r) {

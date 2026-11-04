@@ -58,6 +58,15 @@ async def basic_auth(request: Request, call_next):
     return await call_next(request)
 
 
+@app.middleware("http")
+async def revalidate_assets(request: Request, call_next):
+    """Make browsers check for a newer app version instead of reusing a stale copy."""
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 # ---------------- models ----------------
 class ClientIn(BaseModel):
     name: str
@@ -65,6 +74,13 @@ class ClientIn(BaseModel):
     email: str | None = None
     industry: str | None = None
     notes: str | None = None
+
+
+class FirstLookIn(BaseModel):
+    url: str
+    max_pages: int = 100
+    industry: str | None = None
+    language: str | None = "en"
 
 
 class SiteIn(BaseModel):
@@ -99,7 +115,7 @@ def _normalize_site_url(url: str) -> str:
 # ---------------- clients ----------------
 @app.get("/api/clients")
 def list_clients():
-    clients = db.rows("SELECT * FROM clients ORDER BY name COLLATE NOCASE")
+    clients = db.rows("SELECT * FROM clients WHERE kind = 'client' ORDER BY name COLLATE NOCASE")
     for c in clients:
         c["sites"] = db.rows(
             "SELECT s.id, s.url, s.interval_hours, s.last_run_at, "
@@ -174,6 +190,28 @@ def get_upload(name: str):
     return FileResponse(path, headers={"X-Content-Type-Options": "nosniff"})
 
 
+# ---------------- first look ----------------
+@app.get("/api/first-look")
+def list_first_look():
+    return db.rows(
+        "SELECT s.id, s.url, s.industry, s.max_pages, s.last_run_at, a.status, a.progress, a.score, a.pages_crawled, a.error, "
+        "a.issues_critical, a.issues_high FROM sites s "
+        "LEFT JOIN audits a ON a.id = (SELECT MAX(id) FROM audits WHERE site_id = s.id) "
+        "WHERE s.client_id = ? ORDER BY s.id DESC", (db.first_look_client_id(),))
+
+
+@app.post("/api/first-look")
+def create_first_look(f: FirstLookIn):
+    """Add a website we do not manage and start its crawl. Adding it again re-runs it."""
+    url = _normalize_site_url(f.url)
+    cid = db.first_look_client_id()
+    existing = db.row("SELECT id FROM sites WHERE client_id = ? AND url = ?", (cid, url))
+    sid = existing["id"] if existing else db.execute(
+        "INSERT INTO sites(client_id, url, industry, language, max_pages, interval_hours, created_at) VALUES(?,?,?,?,?,0,?)",
+        (cid, url, f.industry, f.language or "en", max(5, min(f.max_pages, 500)), db.now_iso()))
+    return {"site_id": sid, "audit_id": audit.start_audit(sid)}
+
+
 # ---------------- sites ----------------
 @app.post("/api/sites")
 def create_site(s: SiteIn):
@@ -208,6 +246,7 @@ def delete_site(sid: int):
 def get_site(sid: int):
     s = _404(db.row("SELECT * FROM sites WHERE id = ?", (sid,)))
     s["client"] = db.row("SELECT * FROM clients WHERE id = ?", (s["client_id"],))
+    s["first_look"] = s["client"]["kind"] == "first_look"
     s["history"] = metrics.audit_history(sid)
     s["latest"] = db.row("SELECT id, status, progress, score, started_at, finished_at, error FROM audits WHERE site_id = ? ORDER BY id DESC LIMIT 1", (sid,))
     s["latest_done"] = db.row("SELECT id FROM audits WHERE site_id = ? AND status='done' ORDER BY id DESC LIMIT 1", (sid,))
@@ -223,6 +262,8 @@ def start_audit(sid: int):
 @app.post("/api/sites/{sid}/sync")
 def sync(sid: int, days: int = 90):
     s = _404(db.row("SELECT * FROM sites WHERE id = ?", (sid,)))
+    if s["client_id"] == db.first_look_client_id():
+        raise HTTPException(400, "First-look websites use crawl data only")
     try:
         return windsor.sync_site(s, days=max(7, min(days, 480)))
     except windsor.WindsorError as exc:

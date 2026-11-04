@@ -35,8 +35,12 @@ def group_of(category: str) -> str:
     return "Technical"
 
 
-def scores(issues: list[dict], pages_ok: int, extra: dict | None = None) -> dict:
-    """0–100 per group: penalty grows with severity and share of affected pages."""
+def scores(issues: list[dict], pages_ok: int, extra: dict | None = None, exclude: tuple = ()) -> dict:
+    """0–100 per group: penalty grows with severity and share of affected pages.
+
+    ``exclude`` drops groups that were not measured, so an unmeasured area cannot
+    score a perfect 100 and inflate the overall number.
+    """
     penalty = defaultdict(float)
     for i in issues:
         share = min(1.0, (i["count"] or 1) / max(pages_ok, 1)) if i["urls"] else 0.5
@@ -49,7 +53,10 @@ def scores(issues: list[dict], pages_ok: int, extra: dict | None = None) -> dict
             out["Performance"] = round((out["Performance"] + extra["perf_score"]) / 2)
     weights = {"Technical": 0.2, "On-page": 0.14, "Content": 0.14, "Internal links": 0.1, "Schema": 0.07,
                "Performance": 0.1, "Mobile": 0.07, "Security": 0.05, "AI search (GEO)": 0.08, "Tracking & CRO": 0.05}
-    overall = round(sum(out[g] * w for g, w in weights.items()))
+    for g in exclude:
+        out.pop(g, None)
+        weights.pop(g, None)
+    overall = round(sum(out[g] * w for g, w in weights.items()) / sum(weights.values()))
     return {"overall": overall, "categories": out}
 
 

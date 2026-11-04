@@ -93,3 +93,8 @@ pre { background: var(--soft); padding: 12px; border-radius: 8px; white-space: p
   .g2, .g3 { grid-template-columns: 1fr; }
   #tree-svg, #graph-svg { height: 480px; }
 }
+
+.warn { color: var(--amber); }
+.metric-list { width: 100%; border-collapse: collapse; }
+.metric-list td { padding: 4px 8px 4px 0; border-bottom: 1px solid var(--border); }
+.rules { max-height: 280px; overflow: auto; font-size: 12px; white-space: pre; background: var(--soft); padding: 10px; border-radius: 6px; }

@@ -57,14 +57,19 @@ python webapp/run.py            # http://127.0.0.1:8000
 | Schema | Types found, coverage, pages without structured data with a suggested type, required/recommended property validation |
 | Core Web Vitals | PageSpeed Insights mobile and desktop: LCP, INP, CLS (CrUX field data when available), Lighthouse scores, top opportunities |
 | Keyword Research | Niche keyword universe (site terms, industry modifiers, question patterns, Google Autocomplete, GSC, optional DataForSEO volumes), intent, funnel stage, clusters, target URL or content gap with a suggested slug, striking-distance terms |
+| Redirects & Canonicals | 301, 410 and canonical plan built from 404s, anchor text, internal link suggestions, duplicates, cannibalized keywords and Search Console; keep-or-merge decision for each competing page; internal links to update; keyword stuffing guard; Apache and nginx rules |
 | Rankings & Traffic | GSC clicks, impressions and position trends; top keyword ranking lines; improvements and declines (28 days vs previous 28 days); GA4 organic sessions and key events |
 | AIO / GEO | AI Overview / generative-engine brief: prerequisites, playbook, answer template, page scores with fixes, question opportunities |
 | Lead Gen & Tracking | GA4 + GTM event plan: which event goes on which page and element, the trigger, its parameters, and whether it is a key event; lead-gen gaps and opportunity spots |
 | Off-page | Free and paid guest-post and contributor platforms by niche, digital PR sources, clickable prospecting search footprints, pitch topics |
 
+## First look
+
+Use **First look** in the top bar to review a website you do not manage. These sites stay out of Clients and are never scheduled. A first look reads no Search Console, GA4, PageSpeed, DataForSEO or Autocomplete data, so the score leaves out Performance and Tracking. Crawls obey robots.txt (including Crawl-delay, up to 10 seconds) and wait at least 1 second between requests. A site that disallows crawling reports that and fetches no pages.
+
 ## Exports
 
-- **Full report (Excel)**: 22 sheets, each with a summary chart where one fits.
+- **Full report (Excel)**: 27 sheets, each with a summary chart where one fits.
 - **Internal links (Excel)**: link suggestions, orphans and inlinks, links to redirects, broken internal links.
 - **Printable report**: a self-contained HTML file with inline SVG charts and the client photo. Use *Print → Save as PDF*.
 

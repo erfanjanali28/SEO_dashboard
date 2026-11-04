@@ -34,6 +34,7 @@ PAGES = {
 <url><loc>http://127.0.0.1:{port}/blog/drain-cleaning-tips/</loc></url></urlset>""",
 }
 REDIRECTS = {"/moved": "/services/plumbing-repair/"}
+HITS = []  # every path requested, so tests can prove what was never fetched
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -42,6 +43,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send(self, head_only=False):
         port = self.server.server_address[1]
+        HITS.append(self.path)
         path = self.path.split("?")[0]
         if path in REDIRECTS:
             self.send_response(301)

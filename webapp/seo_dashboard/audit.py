@@ -9,11 +9,13 @@ from collections import Counter
 from urllib.parse import urlparse
 
 from . import db, metrics
-from .analyzers import content, conversion, geo, html_pages, indexable, keywords, links, offpage, performance, priorities, technical
+from .analyzers import content, conversion, firstlook, geo, html_pages, indexable, keywords, links, offpage, performance, priorities, redirects, technical
 from .crawler import crawl
 from .integrations import dataforseo
 
 _running: dict[int, threading.Thread] = {}
+FIRST_LOOK_DELAY = 1.0   # seconds between requests to a site we do not manage
+FIRST_LOOK_UNMEASURED = ("Performance", "Tracking & CRO")
 
 
 def _progress(audit_id: int):
@@ -31,6 +33,8 @@ def run_audit(site_id: int, audit_id: int | None = None) -> int:
                               (site_id, db.now_iso()))
     cb = _progress(audit_id)
     try:
+        owner = db.row("SELECT kind FROM clients WHERE id = ?", (site["client_id"],))
+        site["first_look"] = bool(owner and owner["kind"] == "first_look")
         result = build_result(site, cb)
         sev = Counter(i["severity"] for i in result["issues"])
         db.execute(
@@ -61,13 +65,16 @@ def start_audit(site_id: int) -> int:
 
 def build_result(site: dict, progress=None, live_keywords: bool = True, run_psi: bool | None = None) -> dict:
     progress = progress or (lambda m: None)
-    cr = crawl(site["url"], max_pages=int(site.get("max_pages") or 150), progress=progress)
+    first_look = bool(site.get("first_look"))
+    cr = crawl(site["url"], max_pages=int(site.get("max_pages") or 150), progress=progress,
+               respect_robots=first_look, delay=FIRST_LOOK_DELAY if first_look else 0.0)
     ok = html_pages(cr.pages)
     progress("Analyzing keywords")
     kw_map = {p["url"]: keywords.page_keywords(p) for p in ok}
-    gsc = metrics.gsc_rows(site["id"]) if site.get("id") else []
-    ga4 = metrics.ga4_rows(site["id"]) if site.get("id") else []
-    research = keywords.keyword_research(cr, site, kw_map, gsc, live=live_keywords, provider=dataforseo.provider_for(site))
+    gsc = metrics.gsc_rows(site["id"]) if site.get("id") and not first_look else []
+    ga4 = metrics.ga4_rows(site["id"]) if site.get("id") and not first_look else []
+    research = keywords.keyword_research(cr, site, kw_map, gsc, live=live_keywords and not first_look,
+                                         provider=None if first_look else dataforseo.provider_for(site))
     meta_sugg = keywords.meta_suggestions(cr, kw_map)
     progress("Running technical checks")
     tech = technical.analyze(cr)
@@ -79,17 +86,24 @@ def build_result(site: dict, progress=None, live_keywords: bool = True, run_psi:
     g = geo.analyze(cr, research)
     progress("Building the conversion tracking plan")
     conv = conversion.analyze(cr, ga4)
-    if run_psi is None:
+    progress("Working out redirects and canonicals")
+    rd = redirects.analyze(cr, kw_map, tech["stats"], cont["stats"], lnk["suggestions"], gsc)
+    if first_look:
+        run_psi = False
+    elif run_psi is None:
         run_psi = (db.get_setting("pagespeed_enabled", "1") != "0")
     progress("Measuring Core Web Vitals")
     sample = _psi_sample(cr, ok)
     perf = performance.analyze(sample, db.get_setting("pagespeed_api_key"), enabled=run_psi)
     off = offpage.analyze(site, research, urlparse(cr.origin).hostname or "")
 
-    issues = tech["issues"] + cont["issues"] + lnk["issues"] + g["issues"] + conv["issues"] + perf["issues"]
+    issues = tech["issues"] + cont["issues"] + lnk["issues"] + g["issues"] + perf["issues"] + rd["issues"]
+    if not first_look:
+        issues += conv["issues"]
     perf_scores = [r["scores"].get("performance") for r in perf["results"] if "error" not in r and r["strategy"] == "mobile"]
     sc = priorities.scores(issues, len(ok), {"geo_avg": g["average"] if g["pages"] else None,
-                                             "perf_score": round(sum(perf_scores) / len(perf_scores)) if perf_scores else None})
+                                             "perf_score": round(sum(perf_scores) / len(perf_scores)) if perf_scores else None},
+                         exclude=FIRST_LOOK_UNMEASURED if first_look else ())
     top10 = priorities.top_actions(issues, len(ok))
     plan = priorities.roadmap(issues, len(ok), {"content_gaps": research["status_counts"].get("content gap", 0),
                                                 "link_suggestions": len(lnk["suggestions"])})
@@ -116,6 +130,8 @@ def build_result(site: dict, progress=None, live_keywords: bool = True, run_psi:
         "links": {"stats": lnk["stats"], "suggestions": lnk["suggestions"], "tree": lnk["tree"], "graph": lnk["graph"]},
         "keywords": research, "meta_suggestions": meta_sugg, "performance": perf, "geo": g,
         "conversion": conv, "offpage": off, "pages": pages_summary,
+        "redirects": {k: v for k, v in rd.items() if k != "issues"},
+        "first_look": firstlook.summary(cr, tech["stats"], lnk["stats"], g["average"] if g["pages"] else None) if first_look else None,
         "robots": cr.robots, "sitemaps": {k: v for k, v in cr.sitemaps.items() if k != "lastmod"} | {"url_count": len(cr.sitemaps.get("urls", []))},
         "llms_txt": cr.llms_txt,
     }
