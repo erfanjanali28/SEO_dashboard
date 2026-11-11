@@ -468,4 +468,11 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 @app.get("/", response_class=HTMLResponse)
 def index():
-    return FileResponse(os.path.join(STATIC, "index.html"))
+    """Serve the SPA with versioned asset URLs, so a browser never keeps an
+    old app.js or styles.css after the app is updated."""
+    with open(os.path.join(STATIC, "index.html"), encoding="utf-8") as fh:
+        page = fh.read()
+    for name in ("app.js", "styles.css"):
+        version = int(os.path.getmtime(os.path.join(STATIC, name)))
+        page = page.replace(f"/static/{name}\"", f"/static/{name}?v={version}\"")
+    return HTMLResponse(page, headers={"Cache-Control": "no-cache"})
