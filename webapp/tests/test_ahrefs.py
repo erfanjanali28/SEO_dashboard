@@ -168,7 +168,7 @@ def test_bad_key(env):
     db, ahrefs, rep, sid, mp = env
     mp.setattr(ahrefs.requests, "get", make_get(0))
     db.set_setting("ahrefs_api_key", "wrong")
-    with pytest.raises(ahrefs.AhrefsError, match="rejected the API key"):
+    with pytest.raises(ahrefs.AhrefsError, match=r"refused the request \(HTTP 401\): Invalid API key"):
         ahrefs.limits()
 
 

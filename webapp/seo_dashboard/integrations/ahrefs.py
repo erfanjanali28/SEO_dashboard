@@ -53,7 +53,10 @@ def get(path: str, params: dict | None = None, api_key: str | None = None, timeo
     if "units" in msg.lower() and "limit" in msg.lower():
         raise UnitsError(msg)
     if r.status_code in (401, 403):
-        raise AhrefsError("Ahrefs rejected the API key. Create one under Account settings → API keys and save it in Settings.")
+        raise AhrefsError(
+            f"Ahrefs refused the request (HTTP {r.status_code}): {msg or 'no reason given'}. "
+            "Check that you copied the whole key from Ahrefs → Account settings → API keys (no spaces), "
+            "that the key has not been revoked or expired, and that your Ahrefs plan includes API access.")
     raise AhrefsError(f"Ahrefs HTTP {r.status_code}: {msg}")
 
 
