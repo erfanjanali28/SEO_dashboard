@@ -342,7 +342,22 @@ async function viewSettings() {
           : `API units left: ${r.units_left == null ? "unlimited" : r.units_left.toLocaleString()}.`);
     } catch (e) { out.innerHTML = `<span class="bad">✗ ${esc(e.message)}</span> Save the key first if you just pasted it.`; }
   };
-  $("#set").onsubmit = async (e) => { e.preventDefault(); await api("/api/settings", { method: "PUT", body: Object.fromEntries(new FormData(e.target).entries()) }); toast("Settings saved"); route(); };
+  $("#set").onsubmit = async (e) => {
+    e.preventDefault();
+    const sent = Object.fromEntries(new FormData(e.target).entries());
+    const saved = await api("/api/settings", { method: "PUT", body: sent });
+    // A server still running older code silently ignores settings it does not know.
+    const dropped = Object.keys(sent).filter((k) => sent[k] && !(k in saved));
+    if (dropped.length) {
+      modal(`<h2>Not saved: the app server is out of date</h2>
+        <p>The page is the new version, but the server behind it is still running older code, so it ignored: <b>${dropped.map(esc).join(", ")}</b>.</p>
+        <ol><li>Close <b>every</b> black terminal window running the dashboard (or restart the computer).</li>
+        <li>Start the dashboard again (<code>start-dashboard</code>).</li><li>Press <b>Ctrl+F5</b> and save the key again.</li></ol>
+        <button class="btn" onclick="closeModal()">OK</button>`);
+      return;
+    }
+    toast("Settings saved"); route();
+  };
 }
 function applyTheme(t) { if (t) document.documentElement.dataset.theme = t; else delete document.documentElement.dataset.theme; }
 try { applyTheme(localStorage.getItem("theme") || ""); } catch {}
