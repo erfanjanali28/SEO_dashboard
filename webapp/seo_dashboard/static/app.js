@@ -220,6 +220,19 @@ async function viewClient(id) {
   $("#add-site").onclick = () => siteForm({ client_id: id, industry: c.industry });
   document.querySelectorAll("[data-run]").forEach((b) => b.onclick = async () => { await api(`/api/sites/${b.dataset.run}/audit`, { method: "POST" }); location.hash = `#/site/${b.dataset.run}`; });
 }
+async function loadAhrefsProjects(s, suggestOnly) {
+  const note = $("#a-note"), el = $("#a-proj");
+  if (!note || !el) return;
+  try {
+    const r = await api(`/api/ahrefs/projects${s.url ? "?site_url=" + encodeURIComponent(s.url) : ""}`);
+    const pick = (suggestOnly ? "" : s.ahrefs_project_id) || r.suggested || "";
+    el.innerHTML = `<option value="">Auto-detect from the domain</option>` + r.projects.map((p) =>
+      `<option value="${esc(p.id)}" ${p.id === pick ? "selected" : ""}>${esc(p.name)} (${esc(p.url)})</option>`).join("");
+    note.innerHTML = `${r.projects.length} Ahrefs project(s) found.` + (s.url && !r.suggested ? " <b>No project matches this domain. Pick one, or add the domain as a project in Ahrefs.</b>" : "");
+  } catch (e) {
+    note.innerHTML = /API key/.test(e.message) ? `Ahrefs is not connected. <a href="#/settings">Add your Ahrefs API key in Settings</a>.` : `Ahrefs projects could not be loaded: ${esc(e.message)}`;
+  }
+}
 async function loadWindsorAccounts(s, suggestOnly) {
   const note = $("#w-note");
   if (!note) return;
@@ -257,16 +270,19 @@ function siteForm(s = {}) {
     <div class="grid g2"><div><label>Windsor.ai: Search Console site</label><select name="windsor_gsc_account" id="w-gsc"><option value="">Auto-detect from the domain</option>${s.windsor_gsc_account ? `<option value="${esc(s.windsor_gsc_account)}" selected>${esc(s.windsor_gsc_account)}</option>` : ""}</select></div>
     <div><label>Windsor.ai: GA4 property</label><select name="windsor_ga4_account" id="w-ga4"><option value="">Auto-detect from the domain</option>${s.windsor_ga4_account ? `<option value="${esc(s.windsor_ga4_account)}" selected>${esc(s.windsor_ga4_account)}</option>` : ""}</select></div></div>
     <p class="muted small" id="w-note">Loading your Windsor.ai accounts…</p>
+    <label>Ahrefs project</label><select name="ahrefs_project_id" id="a-proj"><option value="">Auto-detect from the domain</option>${s.ahrefs_project_id ? `<option value="${esc(s.ahrefs_project_id)}" selected>${esc(s.ahrefs_project_id)}</option>` : ""}</select>
+    <p class="muted small" id="a-note">Loading your Ahrefs projects…</p>
     <div class="row" style="margin-top:16px"><button class="btn" type="submit">Save</button><button class="btn secondary" type="button" onclick="closeModal()">Cancel</button></div></form>`);
   loadWindsorAccounts(s);
-  $("#sf [name=url]").onchange = () => loadWindsorAccounts({ ...s, url: $("#sf [name=url]").value }, true);
+  loadAhrefsProjects(s);
+  $("#sf [name=url]").onchange = () => { const u = { ...s, url: $("#sf [name=url]").value }; loadWindsorAccounts(u, true); loadAhrefsProjects(u, true); };
   $("#sf").onsubmit = async (e) => {
     e.preventDefault();
     const d = Object.fromEntries(new FormData(e.target).entries());
     const interval = d.interval_preset === "custom" ? parseInt(d.interval_custom || "0", 10) : parseInt(d.interval_preset, 10);
     const body = { client_id: s.client_id, url: d.url, industry: d.industry, location: d.location, seed_keywords: d.seed_keywords, competitors: d.competitors,
       interval_hours: interval || 0, max_pages: parseInt(d.max_pages, 10) || 150, language: d.language || "en",
-      windsor_gsc_account: d.windsor_gsc_account, windsor_ga4_account: d.windsor_ga4_account };
+      windsor_gsc_account: d.windsor_gsc_account, windsor_ga4_account: d.windsor_ga4_account, ahrefs_project_id: d.ahrefs_project_id };
     try {
       const saved = s.id ? await api(`/api/sites/${s.id}`, { method: "PUT", body }) : await api("/api/sites", { method: "POST", body });
       closeModal();
@@ -287,6 +303,15 @@ async function viewSettings() {
       <li>Paste it below, click <b>Save settings</b>, then <b>Test connection</b>.</li></ol>
       <label>Windsor.ai API key</label><input name="windsor_api_key" value="${esc(s.windsor_api_key || "")}" autocomplete="off">
       <div class="row" style="margin-top:10px"><button class="btn secondary" type="button" id="w-test">Test connection</button></div><div id="w-result" class="small" style="margin-top:8px"></div></div>
+    <div class="card"><h2>Ahrefs</h2>
+      <p class="muted small">Ahrefs connects apps with an <b>API key</b>, not your login and password.</p>
+      <ol class="small"><li>In Ahrefs, open <b>Account settings → API keys</b> (workspace owner or admin) and create a key.</li>
+      <li>Paste it below, click <b>Save settings</b>, then <b>Test connection</b>.</li>
+      <li>Every website that is a project in your Ahrefs account then gets the <b>Ahrefs</b> tab analysis.</li></ol>
+      <label>Ahrefs API key</label><input name="ahrefs_api_key" value="${esc(s.ahrefs_api_key || "")}" autocomplete="off">
+      <label>Keyword country (2 letters, e.g. CZ; empty = from the domain ending)</label><input name="ahrefs_country" maxlength="2" value="${esc(s.ahrefs_country || "")}">
+      <label>Run the Ahrefs analysis with every scheduled audit</label><select name="ahrefs_auto"><option value="0" ${s.ahrefs_auto !== "1" ? "selected" : ""}>No (run it manually, saves API units)</option><option value="1" ${s.ahrefs_auto === "1" ? "selected" : ""}>Yes</option></select>
+      <div class="row" style="margin-top:10px"><button class="btn secondary" type="button" id="a-test">Test connection</button></div><div id="a-result" class="small" style="margin-top:8px"></div></div>
     <div class="card"><h2>Core Web Vitals (PageSpeed Insights)</h2>
       <p class="muted small">Optional Google API key with the PageSpeed Insights API enabled. It raises the quota. Without a key, PSI still works at a low rate.</p>
       <label>PageSpeed API key</label><input name="pagespeed_api_key" value="${esc(s.pagespeed_api_key || "")}" autocomplete="off">
@@ -308,6 +333,15 @@ async function viewSettings() {
       out.innerHTML = `<span class="ok">✓ Connected.</span> ${r.gsc_accounts} Search Console site(s): ${r.gsc.map((a) => esc(a.name)).join(", ") || "none"}.<br>${r.ga4_accounts} GA4 propert${r.ga4_accounts === 1 ? "y" : "ies"}: ${r.ga4.map((a) => esc(a.name)).join(", ") || "none"}.`;
     } catch (e) { out.innerHTML = `<span class="bad">✗ ${esc(e.message)}</span> Save the key first if you just pasted it.`; }
   };
+  $("#a-test").onclick = async () => {
+    const out = $("#a-result"); out.textContent = "Testing…";
+    try {
+      const r = await api("/api/ahrefs/test", { method: "POST" });
+      out.innerHTML = `<span class="ok">✓ Connected</span> (${esc(r.subscription || "plan unknown")}). ${r.projects.length} project(s): ${r.projects.slice(0, 12).map((p) => esc(p.name)).join(", ")}${r.projects.length > 12 ? "…" : ""}.<br>` +
+        (r.units_left === 0 ? `<span class="bad">API units left: 0.</span> Only the free parts run (project match, Domain Rating, Search Console, GA4, crawl data) until the plan includes API units${r.reset ? " (usage resets " + esc(r.reset.slice(0, 10)) + ")" : ""}.`
+          : `API units left: ${r.units_left == null ? "unlimited" : r.units_left.toLocaleString()}.`);
+    } catch (e) { out.innerHTML = `<span class="bad">✗ ${esc(e.message)}</span> Save the key first if you just pasted it.`; }
+  };
   $("#set").onsubmit = async (e) => { e.preventDefault(); await api("/api/settings", { method: "PUT", body: Object.fromEntries(new FormData(e.target).entries()) }); toast("Settings saved"); route(); };
 }
 function applyTheme(t) { if (t) document.documentElement.dataset.theme = t; else delete document.documentElement.dataset.theme; }
@@ -316,7 +350,7 @@ try { applyTheme(localStorage.getItem("theme") || ""); } catch {}
 /* ---------------- Site dashboard ---------------- */
 const TABS = [["overview", "Overview"], ["growth", "Growth & Decline"], ["priorities", "Top 10 & Roadmap"], ["technical", "Technical"], ["onpage", "On-page & Meta"], ["content", "Content"],
   ["links", "Internal Links"], ["redirects", "Redirects & Canonicals"], ["structure", "URL Structure"], ["schema", "Schema"], ["performance", "Core Web Vitals"], ["keywords", "Keyword Research"],
-  ["search", "Rankings & Traffic"], ["geo", "AIO / GEO"], ["conversion", "Lead Gen & Tracking"], ["offpage", "Off-page"], ["crawl", "Crawl Data"]];
+  ["search", "Rankings & Traffic"], ["geo", "AIO / GEO"], ["conversion", "Lead Gen & Tracking"], ["offpage", "Off-page"], ["ahrefs", "Ahrefs"], ["crawl", "Crawl Data"]];
 const FIRST_LOOK_HIDDEN = new Set(["performance", "keywords", "search", "conversion", "offpage"]);
 
 async function viewSite(id, tab) {
@@ -359,6 +393,7 @@ async function viewSite(id, tab) {
   }
   const body = $("#tab-body");
   if (tab === "search") return renderSearch(body, id);
+  if (tab === "ahrefs") return renderAhrefs(body, s);
   if (!doneId) { body.innerHTML = `<div class="card"><p>No completed audit yet. ${running ? "Results appear here as soon as the crawl finishes." : "Click <b>Run audit</b> to crawl the site."}</p></div>`; return; }
   const r = await api(`/api/audits/${doneId}/result`);
   const renderers = { overview: renderOverview, growth: renderGrowth, priorities: renderPriorities, technical: renderTechnical, onpage: renderOnpage, content: renderContent,
@@ -880,3 +915,82 @@ function renderCrawl(el, r) {
 }
 
 route();
+
+/* ---------------- Ahrefs ---------------- */
+function mdBold(t) { return esc(t).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>"); }
+
+async function renderAhrefs(el, s) {
+  const data = await api(`/api/sites/${s.id}/ahrefs`);
+  if (!data.configured) {
+    el.innerHTML = `<div class="card"><h3>Connect Ahrefs</h3><p>Add your Ahrefs <b>API key</b> in <a href="#/settings">Settings</a> (Ahrefs → Account settings → API keys). Every website that is a project in your Ahrefs account then gets this analysis: overview metrics explained, conversions, content gap and strategy.</p></div>`;
+    return;
+  }
+  const r = data.report;
+  el.innerHTML = `<div class="card row space"><div><h3 style="margin:0">Ahrefs site analysis</h3>
+      <div class="muted small">${r ? "Last run " + fmtDate(r.generated_at) : "Not run yet for this website."} ${r && r.project ? "· Project: " + esc(r.project.project_name) + " (" + esc(r.project.url) + ")" : r ? "· <b>No matching Ahrefs project</b>" : ""}</div></div>
+      <div class="row"><label class="small" style="margin:0"><input type="checkbox" id="a-gap" checked style="width:auto"> Include content gap</label>
+      <button class="btn gold" id="a-run">${r ? "Run again" : "Run Ahrefs analysis"}</button></div></div><div id="a-body"></div>`;
+  $("#a-run").onclick = async () => {
+    const b = $("#a-run"); b.disabled = true; b.textContent = "Running… (up to a minute)";
+    try { await api(`/api/sites/${s.id}/ahrefs?gap=${$("#a-gap").checked ? 1 : 0}`, { method: "POST" }); route(); }
+    catch (e) { toast(e.message, 10000); b.disabled = false; b.textContent = "Run Ahrefs analysis"; }
+  };
+  if (!r) return;
+  const body = $("#a-body");
+  const plan = r.plan || {};
+  const statusIcon = (ok) => ok === true ? '<span class="ok">✓</span>' : ok === false ? '<span class="bad">✗</span>' : '<span class="muted">?</span>';
+  body.innerHTML = `
+    <div class="card" style="margin-top:12px"><h3>Headline</h3><p>${mdBold(r.headline)}</p>
+      <div class="row" style="gap:6px;flex-wrap:wrap">${r.chain.map((c, i) => `${i ? '<span class="muted">→</span>' : ""}<span class="pill ${c.ok === false ? "sev-critical" : c.ok ? "sev-low" : ""}">${statusIcon(c.ok)} ${esc(c.step)}</span>`).join(" ")}</div>
+      <p class="muted small">Plan: ${esc(plan.subscription || "?")} · API units left: ${plan.units_left == null ? "unlimited" : plan.units_left.toLocaleString()} · a full run uses about ${plan.estimate ? plan.estimate.toLocaleString() : "?"} units.</p>
+      ${r.skipped.length ? `<div class="issue medium"><b>Not included this time</b><ul>${r.skipped.map((x) => `<li>${esc(x)}</li>`).join("")}</ul></div>` : ""}</div>
+    ${Object.keys(r.indexed || {}).length ? `<div class="card" style="margin-top:12px"><h3>Performance, indexed (first month = 100)</h3><p class="muted small">Every metric starts at 100, so lines on very different scales fit on one chart. A line that falls below 100 has dropped since the first month.</p><div class="chart-box tall"><canvas id="c-idx"></canvas></div></div>` : ""}
+    <h2>Part A: Overview, explained</h2>
+    <div class="grid g2">${r.cards.map((c) => `<div class="card" style="border-left:4px solid ${c.status === "warn" ? "var(--amber)" : c.status === "info" ? "var(--border)" : "var(--green)"}">
+      <h3 style="margin-top:0">${esc(c.title)}</h3><p class="small"><b>What it is:</b> ${esc(c.what)}</p><p><b>${esc(c.value)}</b></p>
+      <p class="small"><b>Effect on organic search:</b> ${esc(c.effect)}</p><p class="small"><b>Action:</b> ${esc(c.action)}</p></div>`).join("") || '<div class="card muted">No overview metrics yet.</div>'}</div>
+    ${r.competitors && r.competitors.length ? `<h3>Top organic competitors</h3><div id="t-ac"></div>` : ""}
+    <h2>Part B: Conversions (GA4)</h2><div id="a-conv"></div>
+    <h2>Part C: Content gap</h2><div id="a-gap-body"></div>
+    <h2>Biggest issues</h2><div class="card">${r.issues.length ? `<ol>${r.issues.map((i) => `<li><b>${esc(i.title)}:</b> ${esc(i.detail)}</li>`).join("")}</ol>` : '<p class="ok">No major issue found in the data available.</p>'}</div>
+    <div class="grid g2" style="margin-top:12px"><div class="card"><h3>Quick wins</h3><ul>${r.quick_wins.map((x) => `<li>${esc(x)}</li>`).join("") || "<li class='muted'>None yet</li>"}</ul></div>
+      <div class="card"><h3>Long-term work</h3><ul>${r.long_term.map((x) => `<li>${esc(x)}</li>`).join("") || "<li class='muted'>None yet</li>"}</ul></div></div>
+    <div class="card" style="margin-top:12px"><b>Next step:</b> ${esc(r.next_step)}</div>`;
+  const idx = r.indexed || {};
+  if (Object.keys(idx).length) {
+    const months = [...new Set(Object.values(idx).flatMap((v) => v.map((p) => p.month)))].sort();
+    chart("c-idx", { type: "line", data: { labels: months, datasets: Object.entries(idx).map(([name, pts], i) => {
+      const m = Object.fromEntries(pts.map((p) => [p.month, p.index])); return { label: name, data: months.map((x) => m[x] ?? null), borderColor: PALETTE[i % 8], spanGaps: true, tension: .25 }; }) },
+      options: { plugins: { tooltip: { callbacks: { label: (c) => `${c.dataset.label}: ${c.parsed.y}` } } } } });
+  }
+  if (r.competitors && r.competitors.length) dataTable("t-ac", r.competitors, [{ key: "competitor_domain", label: "Competitor" }, { key: "domain_rating", label: "DR" },
+    { key: "keywords_common", label: "Shared keywords" }, { key: "keywords_competitor", label: "Only they rank" }, { key: "keywords_target", label: "Only you rank" }, { key: "traffic", label: "Traffic" }], { noFilter: true });
+  const cv = r.conversions || {};
+  const conv = $("#a-conv");
+  if (!cv.available) conv.innerHTML = `<div class="card muted">${esc(cv.reason || "Not available.")}</div>`;
+  else {
+    conv.innerHTML = `${cv.warning ? `<div class="issue critical"><b>Fake key events found.</b> ${esc(cv.warning)}</div>` : ""}
+      <div class="card"><h3>Real leads per month</h3><div class="chart-box"><canvas id="c-leads"></canvas></div></div><div id="t-ev" style="margin-top:12px"></div>`;
+    chart("c-leads", barCfg(cv.months, cv.months.map((m) => cv.leads_by_month[m]), "Leads", C.green));
+    dataTable("t-ev", cv.events, [{ key: "event", label: "Key event" }, { key: "kind", label: "Type", render: (v) => `<span class="pill ${v === "fake" ? "sev-critical" : v === "lead" ? "sev-low" : ""}">${esc(v)}</span>` },
+      { key: "total", label: "Total (12 mo)" }, { key: "first_month", label: "Tracked since" }], { noFilter: true });
+  }
+  const g = r.gap, gb = $("#a-gap-body");
+  if (!g) gb.innerHTML = `<div class="card muted">Not run. ${r.skipped.some((x) => /units/i.test(x)) ? "It needs Ahrefs API units." : "Tick “Include content gap” and add a competitor in the site's settings, or let it use the top organic competitor."}</div>`;
+  else {
+    gb.innerHTML = `<p class="muted small">${esc(g.method)} Competitor: <b>${esc(g.competitor)}</b>.</p>
+      <div class="grid g2"><div class="card"><h3>Where the competitor's traffic comes from</h3><div class="chart-box"><canvas id="c-sec"></canvas></div></div>
+      <div class="card"><h3>Gap topics by priority (searches/month)</h3><div class="chart-box"><canvas id="c-top"></canvas></div></div></div>
+      <div class="issue medium" style="margin-top:12px">Informational topics bring back impressions and AI citations, but they <b>won't fix a drop in commercial leads on their own</b>. Do priority 1 first. For every new page: a two-sentence definition at the top, an example, an FAQ section and a named author.</div>
+      <h3>Topics (gap)</h3><div id="t-topics"></div><h3>Shared keywords: where the competitor wins</h3><div id="t-shared"></div>
+      <details class="issue low"><summary>Skipped keywords (${g.skipped.length})</summary><p class="small">${g.skipped.map((k) => esc(k.keyword) + " (" + esc(k.why) + ")").join(" · ")}</p></details>`;
+    chart("c-sec", barCfg(g.competitor_sections.map((x) => x.section), g.competitor_sections.map((x) => x.keywords), "Keywords", C.slate, true));
+    const tops = g.topics.slice(0, 12);
+    chart("c-top", barCfg(tops.map((t) => t.topic), tops.map((t) => t.volume), "Searches/month", tops.map((t) => t.priority === 1 ? C.red : t.priority === 2 ? C.gold : C.slate), true));
+    dataTable("t-topics", g.topics, [{ key: "priority", label: "Priority", render: (v) => `<span class="pill ${v === 1 ? "sev-critical" : v === 2 ? "sev-medium" : "sev-low"}">P${v}</span>` },
+      { key: "topic", label: "Topic" }, { key: "keywords", label: "Keywords", render: (v) => esc(v.slice(0, 6).join(", ")) }, { key: "volume", label: "Searches/mo" },
+      { key: "kd", label: "KD" }, { key: "competitor_position", label: "Competitor pos." }, { key: "intent", label: "Intent" }, { key: "action", label: "Action" }]);
+    dataTable("t-shared", g.shared, [{ key: "keyword", label: "Keyword" }, { key: "volume", label: "Volume" }, { key: "competitor_position", label: "Competitor" },
+      { key: "target_position", label: "You" }, { key: "winner", label: "Winner", render: (v) => `<span class="${v === "you" ? "ok" : "bad"}">${esc(v)}</span>` }]);
+  }
+}

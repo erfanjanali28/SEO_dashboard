@@ -12,6 +12,7 @@ import time
 from datetime import datetime, timezone
 
 from . import audit, db
+from .analyzers import ahrefs_report
 from .integrations import windsor
 
 _thread: threading.Thread | None = None
@@ -41,6 +42,11 @@ def tick() -> list[int]:
                 pass  # the audit still runs on crawl data alone
         db.execute("UPDATE sites SET last_run_at = ? WHERE id = ?", (db.now_iso(), s["id"]))
         started.append(audit.start_audit(s["id"]))
+        if db.get_setting("ahrefs_api_key") and db.get_setting("ahrefs_auto") == "1":
+            try:
+                ahrefs_report.run(s["id"])
+            except Exception:
+                pass  # an Ahrefs failure never blocks the scheduled audit
     return started
 
 

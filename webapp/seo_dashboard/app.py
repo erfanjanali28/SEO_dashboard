@@ -7,6 +7,7 @@ Run with ``python webapp/run.py`` (see webapp/README.md). Set
 from __future__ import annotations
 
 import base64
+import json
 import os
 import re
 import secrets
@@ -21,11 +22,12 @@ from pydantic import BaseModel
 from url_safety import validate_url
 
 from . import audit, comparison, db, exports, metrics, report, scheduler
-from .integrations import windsor
+from .analyzers import ahrefs_report
+from .integrations import ahrefs, windsor
 
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
-SECRET_SETTINGS = {"windsor_api_key", "pagespeed_api_key", "dataforseo_password"}
-SETTING_KEYS = ["windsor_api_key", "pagespeed_api_key", "pagespeed_enabled", "dataforseo_login", "dataforseo_password", "dataforseo_location_code"]
+SECRET_SETTINGS = {"windsor_api_key", "pagespeed_api_key", "dataforseo_password", "ahrefs_api_key"}
+SETTING_KEYS = ["windsor_api_key", "pagespeed_api_key", "pagespeed_enabled", "dataforseo_login", "dataforseo_password", "dataforseo_location_code", "ahrefs_api_key", "ahrefs_country", "ahrefs_auto"]
 IMAGE_MAGIC = {b"\x89PNG": ".png", b"\xff\xd8\xff": ".jpg", b"GIF8": ".gif", b"RIFF": ".webp"}
 
 
@@ -95,6 +97,7 @@ class SiteIn(BaseModel):
     competitors: str | None = None
     windsor_gsc_account: str | None = None
     windsor_ga4_account: str | None = None
+    ahrefs_project_id: str | None = None
 
 
 def _404(obj, what="Not found"):
@@ -219,9 +222,9 @@ def create_site(s: SiteIn):
     url = _normalize_site_url(s.url)
     sid = db.execute(
         "INSERT INTO sites(client_id, url, industry, location, language, max_pages, interval_hours, seed_keywords, competitors, "
-        "windsor_gsc_account, windsor_ga4_account, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        "windsor_gsc_account, windsor_ga4_account, ahrefs_project_id, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (s.client_id, url, s.industry, s.location, s.language, max(5, min(s.max_pages, 2000)), max(0, s.interval_hours),
-         s.seed_keywords, s.competitors, s.windsor_gsc_account, s.windsor_ga4_account, db.now_iso()))
+         s.seed_keywords, s.competitors, s.windsor_gsc_account, s.windsor_ga4_account, s.ahrefs_project_id or None, db.now_iso()))
     return db.row("SELECT * FROM sites WHERE id = ?", (sid,))
 
 
@@ -230,9 +233,9 @@ def update_site(sid: int, s: SiteIn):
     _404(db.row("SELECT id FROM sites WHERE id = ?", (sid,)))
     db.execute(
         "UPDATE sites SET url=?, industry=?, location=?, language=?, max_pages=?, interval_hours=?, seed_keywords=?, competitors=?, "
-        "windsor_gsc_account=?, windsor_ga4_account=? WHERE id=?",
+        "windsor_gsc_account=?, windsor_ga4_account=?, ahrefs_project_id=? WHERE id=?",
         (_normalize_site_url(s.url), s.industry, s.location, s.language, max(5, min(s.max_pages, 2000)), max(0, s.interval_hours),
-         s.seed_keywords, s.competitors, s.windsor_gsc_account, s.windsor_ga4_account, sid))
+         s.seed_keywords, s.competitors, s.windsor_gsc_account, s.windsor_ga4_account, s.ahrefs_project_id or None, sid))
     return db.row("SELECT * FROM sites WHERE id = ?", (sid,))
 
 
@@ -394,6 +397,48 @@ def windsor_test():
     except windsor.WindsorError as exc:
         raise HTTPException(400, str(exc))
     return {"ok": True, "gsc_accounts": len(accounts["gsc"]), "ga4_accounts": len(accounts["ga4"]), **accounts}
+
+
+# ---------------- Ahrefs ----------------
+@app.post("/api/ahrefs/test")
+def ahrefs_test():
+    try:
+        lim = ahrefs.limits()
+        projects = ahrefs.projects()
+    except ahrefs.AhrefsError as exc:
+        raise HTTPException(400, str(exc))
+    left = None if lim.get("units_limit_workspace") is None else (lim.get("units_limit_workspace") or 0) - (lim.get("units_usage_workspace") or 0)
+    return {"ok": True, "subscription": lim.get("subscription"), "units_left": left, "reset": lim.get("usage_reset_date"),
+            "projects": [{"id": str(p["project_id"]), "name": p.get("project_name"), "url": p.get("url")} for p in projects]}
+
+
+@app.get("/api/ahrefs/projects")
+def ahrefs_projects(site_url: str | None = None):
+    try:
+        projects = ahrefs.projects()
+    except ahrefs.AhrefsError as exc:
+        raise HTTPException(400, str(exc))
+    match = ahrefs.match_project(site_url, projects) if site_url else None
+    return {"projects": [{"id": str(p["project_id"]), "name": p.get("project_name"), "url": p.get("url")} for p in projects],
+            "suggested": str(match["project_id"]) if match else None}
+
+
+@app.get("/api/sites/{sid}/ahrefs")
+def ahrefs_latest(sid: int):
+    _404(db.row("SELECT id FROM sites WHERE id = ?", (sid,)))
+    r = db.row("SELECT * FROM ahrefs_reports WHERE site_id = ? ORDER BY id DESC LIMIT 1", (sid,))
+    return {"report": json.loads(r["result"]) if r else None,
+            "history": db.rows("SELECT id, created_at FROM ahrefs_reports WHERE site_id = ? ORDER BY id DESC LIMIT 20", (sid,)),
+            "configured": bool(db.get_setting("ahrefs_api_key"))}
+
+
+@app.post("/api/sites/{sid}/ahrefs")
+def ahrefs_run(sid: int, gap: int = 1):
+    _404(db.row("SELECT id FROM sites WHERE id = ?", (sid,)))
+    try:
+        return {"report": ahrefs_report.run(sid, run_gap=bool(gap))}
+    except ahrefs.AhrefsError as exc:
+        raise HTTPException(400, str(exc))
 
 
 # ---------------- settings ----------------

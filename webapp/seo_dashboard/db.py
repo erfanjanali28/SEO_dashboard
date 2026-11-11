@@ -44,8 +44,15 @@ CREATE TABLE IF NOT EXISTS sites (
     competitors TEXT,
     windsor_gsc_account TEXT,
     windsor_ga4_account TEXT,
+    ahrefs_project_id TEXT,
     last_run_at TEXT,
     created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ahrefs_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    site_id INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    result TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS audits (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -129,6 +136,8 @@ def init_db() -> None:
         if not has_kind and c.execute("SELECT 1 FROM sqlite_master WHERE name = 'clients'").fetchone():
             c.execute("ALTER TABLE clients ADD COLUMN kind TEXT NOT NULL DEFAULT 'client'")
         c.executescript(SCHEMA)
+        if "ahrefs_project_id" not in {r["name"] for r in c.execute("PRAGMA table_info(sites)")}:
+            c.execute("ALTER TABLE sites ADD COLUMN ahrefs_project_id TEXT")
 
 
 def first_look_client_id() -> int:

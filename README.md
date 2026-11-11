@@ -68,6 +68,19 @@ python webapp/run.py            # http://127.0.0.1:8000
 
 Use **First look** in the top bar to review a website you do not manage. These sites stay out of Clients and are never scheduled. A first look reads no Search Console, GA4, PageSpeed, DataForSEO or Autocomplete data, so the score leaves out Performance and Tracking. Crawls obey robots.txt (including Crawl-delay, up to 10 seconds) and wait at least 1 second between requests. A site that disallows crawling reports that and fetches no pages.
 
+## Ahrefs site analysis
+
+The **Ahrefs** tab runs the agency's Ahrefs site-analysis workflow for any website that is a project in your Ahrefs account (matched by domain, or chosen under the site's *Settings / schedule*):
+
+- **Part A, overview explained.** Referring domains, Domain Rating, organic traffic, keywords, top-3 positions, keywords by intent, impressions and crawled pages. Each one shows *what it is → this domain's value → effect on organic search → action*. Also an indexed performance chart (first month = 100) and the chain **inputs → impressions → clicks → leads**, with the broken link named.
+- **Part B, conversions.** GA4 key events by month (via Windsor.ai), with fake key events (cookie consent, generic click, page_view) flagged and left out of the lead count.
+- **Part C, content gap.** The competitor's top 200 keywords against yours, grouped into topics: priority 1 for commercial/local topics, priority 2 for low-difficulty quick wins (winnable when the competitor ranks below position 10). Includes the shared keywords and the skipped brand/navigation searches.
+- **Biggest issues, quick wins, long-term work and the next step.**
+
+**Connect:** Settings → Ahrefs → paste an **API key** (Ahrefs → Account settings → API keys; Ahrefs has no username/password API) → *Test connection*.
+
+**API units:** Site Explorer data costs Ahrefs API units (a full run with the content gap uses about 11,600). On a plan with 0 units, the tab still runs the free parts (project match, Domain Rating, Search Console, GA4, crawl data) and lists what was skipped. The rest runs automatically once units are available. *Run with every scheduled audit* is off by default, to save units.
+
 ## Exports
 
 - **Full report (Excel)**: 27 sheets, each with a summary chart where one fits.
